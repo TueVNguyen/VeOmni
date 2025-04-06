@@ -1,0 +1,45 @@
+model:
+  model_path: /home/slurm/tuenv2/open_i1_project/sft/360-LLaMA-Factory/model_hub/qwen2.5-Math-1.5B
+  attn_implementation: flash_attention_2
+
+data:
+  train_path: /home/slurm/tuenv2/tuenv/hf/r1_math_only/data
+  data_type: conversation
+  chat_template: chatml
+  max_seq_len: 8192
+  train_size: 3357900800 # 5epoch
+  text_keys: messages
+
+train:
+  output_dir: /home/slurm/tuenv2/tuenv/exp_r1/venomni/sft_qwen_math_1.5b
+  data_parallel_mode: fsdp1
+  ulysses_parallel_size: 1
+  global_batch_size: 128
+  micro_batch_size: 4
+  num_train_epochs: 5
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 512
+  optimizer: adamw
+  lr: 5.0e-5
+  lr_warmup_ratio: 0.1
+  lr_decay_style: constant
+  lr_decay_ratio: 1.0
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: false
+  enable_full_shard: true
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: meta
+  enable_full_determinism: false
+  empty_cache_steps: 5000
+  ckpt_manager: bytecheckpoint
+  load_checkpoint_path: ""
+  save_steps: 5000
+  save_hf_weights: true
+  wandb_project: test_veomni_math_1.5b_fixbug
+  wandb_name: baseline_fix_dyn_bsz_margin_500_buffer_512
