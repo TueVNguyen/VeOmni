@@ -18,7 +18,7 @@ import sys
 import traceback
 from collections import deque
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, Iterator, Optional
-
+from .batching_strategy import KeepInOrderStrategy
 from ..utils import logging
 
 
@@ -46,6 +46,7 @@ class DynamicBatchSizeDataLoader:
         dataloader: Any,
         batching_strategy: "BaseBatchingStrategy",
         collate_fn: Optional[Callable] = None,
+        post_collate_fn: Optional[Callable] = None,
         num_micro_batch: int = 1,
         length: int = 0,
         drop_last: bool = True,
@@ -56,12 +57,16 @@ class DynamicBatchSizeDataLoader:
         self.item_buffer = deque()
         self.step = 0
         self._collate_fn = collate_fn
+        self._post_collate_fn = post_collate_fn
         self._dataloader = dataloader
         self._drop_last = drop_last
         self._data_iter: Iterator
         self._resume = False
         self._batch_data_iter: Generator
-
+        # if length == 0:
+        #     self.is_stop_by_iter = True
+        # else:
+        self.is_stop_by_iter = True
         if length > 0:
             self._length = length
         elif length == -1:
@@ -88,7 +93,8 @@ class DynamicBatchSizeDataLoader:
 
     def batch_data_generator(self):
         batch = []
-
+        from tqdm import tqdm
+        # tqdm_loader = tqdm(range(len(self._dataloader)), desc="DynamicBatchDataset", disable=self.rank != 0)
         while True:
             if self._length and self.step >= self._length:
                 return
@@ -108,9 +114,11 @@ class DynamicBatchSizeDataLoader:
 
             try:
                 processing_item = next(self._data_iter)
+                # tqdm_loader.update(1)
             except Exception as e:
                 if isinstance(e, StopIteration):
-                    if self.step < self._length:
+                    print(f'StopIteration, step: {self.step}, length: {self._length}')
+                    if self.step < self._length and self.is_stop_by_iter == False:
                         # call iter until reach length
                         self._data_iter = iter(self._dataloader)
                         processing_item = next(self._data_iter)
@@ -118,6 +126,7 @@ class DynamicBatchSizeDataLoader:
                         while not self.batching_strategy.empty():
                             micro_batch = self.batching_strategy.get_micro_batch(self.step)
                             if self._collate_fn:
+                                
                                 micro_batch = self._collate_fn(micro_batch)
                             batch.append(micro_batch)
                             if len(batch) == self.num_micro_batch:
@@ -140,19 +149,21 @@ class DynamicBatchSizeDataLoader:
 
             # put processing_item to buffer
             if isinstance(processing_item, dict):
-                processing_item = [processing_item]
-            # import torch
-            for index, item in enumerate(processing_item):
-                # if torch.distributed.get_rank() == 0:
-                #     logger.info(f"index: {index}, item: {item}")
-                if isinstance(item, dict):
-                    self.batching_strategy.put_item(item)
+                if self._post_collate_fn:
+                    processing_item = self._post_collate_fn(processing_item)
                 else:
-                    for sub_item in item:
-                        # import torch
-                        # if torch.distributed.get_rank() == 0:
-                        #     logger.info(f"sub_item: {sub_item}")
-                        self.batching_strategy.put_item(sub_item)
+                    processing_item = [processing_item]
+            # import torch
+            if isinstance(self.batching_strategy, KeepInOrderStrategy):
+                self.batching_strategy.put_item(processing_item)
+            else:
+                for index, item in enumerate(processing_item):
+                    # processing_item is a list of dict
+                    if isinstance(item, dict):
+                        self.batching_strategy.put_item(item)
+                    else:
+                        for sub_item in item:
+                            self.batching_strategy.put_item(sub_item)
 
     def state_dict(self):
         # save state
@@ -180,6 +191,8 @@ class DynamicBatchSizeDataLoader:
                 f"num_micro_batch changed: [ {state['num_micro_batch']} -> {self.num_micro_batch} ], will clear prefetch buffer"
             )
             del state["num_micro_batch"]
+        if "_drop_last" in state:
+            del state["_drop_last"]
         self.__dict__.update(state)
         self._resume = True
 
@@ -196,3 +209,8 @@ class DynamicBatchSizeDataLoader:
 
         self._data_iter = iter(self._dataloader)
         self._batch_data_iter = self.batch_data_generator()
+    
+    def set_epoch(self, epoch: int):
+        if hasattr(self._dataloader, "set_epoch"):
+            self._dataloader.set_epoch(epoch)
+        # self._dataloader.dataset.set_epoch(epoch)

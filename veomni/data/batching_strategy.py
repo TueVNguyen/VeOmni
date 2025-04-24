@@ -60,9 +60,13 @@ class DynBszBuffer:
                 cum_seq_len += seq_len
                 samples.append(self._buffer[self.cur_idx])
                 self.del_idxs.append(self.cur_idx)
+            # else:
+            #     if seq_len > n_token_per_iter - cum_seq_len:
+            #         break
             self.cur_idx += 1
+        # print(cum_seq_len)
         assert len(samples) > 0
-        self.flush()
+        # self.flush()
         return samples
 
     def __len__(self):
@@ -128,6 +132,22 @@ class IdentityPacker:
             else self.token_micro_bsz
         )
 
+
+class KeepInOrderStrategy:
+    def __init__(self, token_micro_bsz, micro_batch_size):
+        self.token_micro_bsz = token_micro_bsz
+        self.micro_batch_size = micro_batch_size
+        self.batch_buffer = []
+
+    def is_full_filled(self):
+        return len(self.batch_buffer) >= 1
+
+    def put_item(self, item):
+        self.batch_buffer.append(item)
+
+    def get_micro_batch(self, step):
+        last = self.batch_buffer.pop()
+        return last
 
 class TextBatchingStrategy(BaseBatchingStrategy):
     """ "

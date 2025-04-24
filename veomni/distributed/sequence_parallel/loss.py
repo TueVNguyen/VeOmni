@@ -51,16 +51,18 @@ class ReduceLoss(torch.autograd.Function):
 
 class ReduceLoss2(torch.autograd.Function):
     @staticmethod
-    def forward(ctx: torch.autograd.Function, loss: torch.Tensor, group: torch.distributed.ProcessGroup) -> torch.Tensor:
+    def forward(ctx: torch.autograd.Function, loss: torch.Tensor) -> torch.Tensor:
+        group = get_unified_sequence_parallel_group()
         dist.all_reduce(loss, group=group, op=torch.distributed.ReduceOp.SUM) 
-        ctx.save_for_backward(group)
         return loss 
 
     @staticmethod
     def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> torch.Tensor:
-        group = ctx.saved_tensors[0]
-        group_size = torch.distributed.get_world_size(group)
-        grad_output = group_size * grad_output
+        # group_size = torch.distributed.get_world_size(group)
+        group_size = get_parallel_state().sp_size 
+        # please note that loss.backward() still compute by loss at current rank of sequence.
+        # so we need to scale up grad_output by group_size
+        grad_output = grad_output  * group_size
         return grad_output, None
 
 def reduce_sequence_parallel_loss(loss: torch.Tensor, num_valid_tokens: torch.Tensor) -> torch.Tensor:

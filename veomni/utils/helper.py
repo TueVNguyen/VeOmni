@@ -119,6 +119,7 @@ class EnvironMeter:
 
     def add(self, micro_batch: Dict[str, "torch.Tensor"]) -> None:
         seqlens = _compute_seqlens(micro_batch, self.rmpad, self.rmpad_with_pos_ids)
+        # print(torch.distributed.get_rank(), seqlens)
         if "image_grid_thw" in micro_batch:
             image_grid_thw = micro_batch["image_grid_thw"]
             image_seqlens = torch.repeat_interleave(image_grid_thw[:, 1] * image_grid_thw[:, 2], image_grid_thw[:, 0])
@@ -133,7 +134,7 @@ class EnvironMeter:
             )
         else:
             flops_achieved, flops_promised = self.estimate_flops(self.batch_seqlens, delta_time)
-
+        # print(self.batch_seqlens, len(self.batch_seqlens), sum(self.batch_seqlens))
         flops_achieved, batch_tokens, real_global_batch_size = all_reduce(
             (flops_achieved, sum(self.batch_seqlens), len(self.batch_seqlens)),
             op="sum",
@@ -141,7 +142,9 @@ class EnvironMeter:
         )
         flops_promised = flops_promised * self.world_size
         mfu = flops_achieved / flops_promised
-
+        # print({"batch_tokens": batch_tokens, "real_global_batch_size": real_global_batch_size, "current_rank": torch.distributed.get_rank(), 
+        #        "current_ddp_rank": get_parallel_state().dp_rank, "current_dp_size": get_parallel_state().dp_size, 
+        #        "current_tokens_batch": sum(self.batch_seqlens), "batch_seqlens": self.batch_seqlens},)
         # calculate average effective len and tokens per second
         avg_effective_len = batch_tokens / self.global_batch_size
         avg_sample_seq_len = batch_tokens / real_global_batch_size

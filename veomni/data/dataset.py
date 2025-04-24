@@ -110,6 +110,7 @@ def build_mapping_dataset(
     data_path: str,
     transform: Optional[Callable] = None,
     namespace: Literal["train", "test"] = "train",
+    key_columns: Optional[List[str]] = None,
 ) -> "Dataset":
     """
     Build mapping dataset.
@@ -141,7 +142,12 @@ def build_mapping_dataset(
             dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace)
         else:
             dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace, cache_dir=cache_dir)
-
+    # dataset = [{}]
+    if key_columns is not None:
+        dataset = [
+            {key: row[key] for key in key_columns}
+            for row in dataset
+        ]
     return MappingDataset(data=dataset, transform=transform)
 
 

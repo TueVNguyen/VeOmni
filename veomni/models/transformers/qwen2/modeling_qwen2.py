@@ -50,7 +50,9 @@ from ....utils.import_utils import is_liger_kernel_available
 
 
 if is_liger_kernel_available():
-    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss  # type: ignore
+    from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss, LigerCrossEntropyLoss  # type: ignore
+    from liger_kernel.transformers.functional import liger_cross_entropy
+
     from liger_kernel.transformers.rms_norm import LigerRMSNorm
     from liger_kernel.transformers.rope import liger_rotary_pos_emb
     from liger_kernel.transformers.swiglu import LigerSwiGLUMLP
@@ -214,7 +216,8 @@ class Qwen2Attention(nn.Module):
                 )
             else:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+        # if torch.distributed.get_rank() == 0:
+        #     import ipdb; ipdb.set_trace()
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -899,11 +902,6 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                     )
                 )
                 labels[cu_seq_lens[1:-1] - 1] = IGNORE_INDEX
-                # kwargs['cu_seq_lens'] = cu_seq_lens
-        # logger.info_rank0(f"labels: {torch.where(labels == IGNORE_INDEX, 0., 1.).sum()}")
-        # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        # if torch.distributed.get_rank() == 0:
-        #     import ipdb; ipdb.set_trace()
         outputs = self.model(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -917,13 +915,11 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             cache_position=cache_position,
             **kwargs,
         )
+        hidden_states = outputs[0]
+        # slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        # hidden_states = hidden_states[:, slice_indices, :]
         # if torch.distributed.get_rank() == 0:
         #     import ipdb; ipdb.set_trace()
-        hidden_states = outputs[0]
-        # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
-        slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        hidden_states = hidden_states[:, slice_indices, :]
-
         loss = None
         logits = None
         if labels is not None:
@@ -936,6 +932,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
                 hidden_states = hidden_states.view(-1, self.config.hidden_size)
                 loss = loss_fct(self.lm_head.weight, hidden_states, labels).sum()
+            
             else:
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
                 logits = self.lm_head(hidden_states)
@@ -948,12 +945,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
                 # Flatten the tokens
                 logits = logits.view(-1, self.vocab_size)
                 loss = loss_fct(logits, labels).sum()
-
-            # if get_parallel_state().sp_enabled:
-            #     num_valid_tokens = (labels != IGNORE_INDEX).sum()
-            #     loss = reduce_sequence_parallel_loss(loss, num_valid_tokens)
         else:
-            logits = self.lm_head(hidden_states)
+            # hidden_states = outputs[0]
+            if hasattr(self, "teacher_model"):
+                logits = None
+            else:
+                logits = self.lm_head(hidden_states)
 
         if not return_dict:
             output = (logits,) + outputs[1:]
@@ -963,7 +960,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             loss=loss,
             logits=logits,
             past_key_values=outputs.past_key_values,
-            hidden_states=outputs.hidden_states,
+            hidden_states=hidden_states,
             attentions=outputs.attentions,
         )
 

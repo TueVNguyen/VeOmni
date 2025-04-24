@@ -170,6 +170,10 @@ class DataArguments:
         default=2,
         metadata={"help": "Number of batches loaded in advance by each worker."},
     )
+    corss_pack: int = field(
+        default=100000,
+        metadata={"help": "Number of tokens for training to compute training steps for dynamic batch dataloader."},
+    )
     drop_last: bool = field(
         default=True,
         metadata={"help": "Whether to drop the last incomplete batch."},
@@ -177,6 +181,10 @@ class DataArguments:
     pin_memory: bool = field(
         default=True,
         metadata={"help": "Whether to pin memory for dataloader."},
+    )
+    is_chatml: bool = field(
+        default=False,
+        metadata={"help": "Whether to use chatml format for training."},
     )
 
     def __post_init__(self):
@@ -471,7 +479,8 @@ class TrainingArguments:
         self.model_assets_dir = os.path.join(self.output_dir, "model_assets")
 
     def compute_train_steps(
-        self, max_seq_len: Optional[int] = None, train_size: Optional[int] = None, dataset_length: Optional[int] = None
+        self, max_seq_len: Optional[int] = None, train_size: Optional[int] = None, dataset_length: Optional[int] = None,
+        legacy_compute: bool = False
     ) -> None:
         """
         Computes the training steps per epoch according to the data length.
@@ -484,7 +493,12 @@ class TrainingArguments:
                 token_micro_bsz = self.micro_batch_size * max_seq_len
             train_size = int(train_size * (1 + self.bsz_warmup_ratio / 2))
             eff_token_rate = (token_micro_bsz - self.dyn_bsz_margin) / token_micro_bsz
-            self._train_steps = math.ceil(train_size / (self.global_batch_size * max_seq_len * eff_token_rate))
+            if legacy_compute == False:
+                self._train_steps = math.ceil(train_size / (self.global_batch_size * token_micro_bsz * eff_token_rate))
+                self._train_steps = int(self._train_steps) * self.num_train_epochs
+                self.num_train_epochs = 1
+            else:
+                self._train_steps = math.ceil(train_size / (self.global_batch_size * token_micro_bsz * eff_token_rate)) + 6
         elif dataset_length is not None:
             self._train_steps = math.floor(dataset_length / self.dataloader_batch_size)  # assuming drop_last is true
         elif self.max_steps is not None:

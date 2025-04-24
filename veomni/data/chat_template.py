@@ -242,9 +242,9 @@ class ChatmlTemplate(ChatTemplate):
                     labels += content_ids
                 
         assert len(input_ids) == len(attention_mask) == len(labels) 
-        assert len(input_ids) <= max_seq_len, f'{len(input_ids)} > {max_seq_len}: {self.tokenizer.decode(input_ids)}'
+        # assert len(input_ids) <= max_seq_len, f'{len(input_ids)} > {max_seq_len}: {self.tokenizer.decode(input_ids)}'
         model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
-        model_inputs = {k: v[-max_seq_len:] for k, v in model_inputs.items()}
+        model_inputs = {k: v[:max_seq_len] for k, v in model_inputs.items()}
         return model_inputs
 
     def get_jinja_template(self) -> str:
