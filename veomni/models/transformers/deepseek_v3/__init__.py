@@ -28,7 +28,7 @@ from .modeling_deepseek import (
 )
 
 
-AutoConfig.register("deepseek_v3", DeepseekV3Config)
-AutoModel.register(DeepseekV3Config, DeepseekV3Model)
-AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM)
-AutoModelForSequenceClassification.register(DeepseekV3Config, DeepseekV3ForSequenceClassification)
+# AutoConfig.register("deepseek_v3", DeepseekV3Config)
+# AutoModel.register(DeepseekV3Config, DeepseekV3Model)
+# AutoModelForCausalLM.register(DeepseekV3Config, DeepseekV3ForCausalLM)
+# AutoModelForSequenceClassification.register(DeepseekV3Config, DeepseekV3ForSequenceClassification)

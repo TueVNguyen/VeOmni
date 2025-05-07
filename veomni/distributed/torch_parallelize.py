@@ -84,7 +84,7 @@ def build_parallelize_model(
     if enable_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         logger.info_rank0("Enable gradient checkpointing.")
         model.gradient_checkpointing_enable(
-            gradient_checkpointing_kwargs={"use_reentrant": kwargs.pop("enable_reentrant", True)}
+            gradient_checkpointing_kwargs={"use_reentrant": kwargs.pop("enable_reentrant", False)}
         )
 
     if parallel_state.tp_enabled:
@@ -155,7 +155,7 @@ def build_parallelize_model(
                 "auto_wrap_policy": wrap_policy,
                 "ignored_states": fsdp_no_shard_states,
                 "device_id": torch.cuda.current_device(),
-                "sharding_strategy": ShardingStrategy.FULL_SHARD if enable_full_shard else ShardingStrategy.NO_SHARD,
+                "sharding_strategy": ShardingStrategy.FULL_SHARD if enable_full_shard else ShardingStrategy.SHARD_GRAD_OP,
                 "device_mesh": parallel_state.fsdp_mesh,
                 **kwargs.pop("fsdp_kwargs", {}),
             }
@@ -207,7 +207,7 @@ def build_parallelize_model(
                 logger.info_rank0(f"Apply NO_SHARD states on '{fsdp_no_shard_states_fqn}'.")
                 fsdp_kwargs.pop("ignored_states", None)
                 fsdp_kwargs.pop("auto_wrap_policy", None)
-                fsdp_kwargs["sharding_strategy"] = ShardingStrategy.NO_SHARD
+                fsdp_kwargs["sharding_strategy"] = ShardingStrategy.SHARD_GRAD_OP
                 for fqn in fsdp_no_shard_states_fqn:
                     no_shard_module = get_module_from_path(model, fqn)
                     if kwargs.get("init_device") == "meta":
@@ -235,7 +235,7 @@ def build_parallelize_model(
                 mixed_precision = MixedPrecision(
                     param_dtype=torch.bfloat16,
                     reduce_dtype=torch.float32,
-                    buffer_dtype=torch.bfloat16,
+                    buffer_dtype=torch.float32,
                 )
                 ddp_kwargs["mixed_precision"] = mixed_precision
 

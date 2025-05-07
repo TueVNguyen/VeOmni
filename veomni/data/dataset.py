@@ -66,6 +66,7 @@ class MappingDataset(Dataset):
         return len(self._data)
 
     def __getitem__(self, index: int) -> List[Dict[str, "torch.Tensor"]]:
+        # logger.info_rank0(f"index: {index}")
         if self._transform is not None:
             return self._transform(self._data[index])
         else:
@@ -109,6 +110,7 @@ def build_mapping_dataset(
     data_path: str,
     transform: Optional[Callable] = None,
     namespace: Literal["train", "test"] = "train",
+    key_columns: Optional[List[str]] = None,
 ) -> "Dataset":
     """
     Build mapping dataset.
@@ -135,8 +137,17 @@ def build_mapping_dataset(
 
     file_extenstion = "json" if file_extenstion == "jsonl" else file_extenstion
     with main_process_first():
-        dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace)
-
+        cache_dir = os.getenv("HF_CACHE_DIR", None)
+        if cache_dir is  None:
+            dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace)
+        else:
+            dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace, cache_dir=cache_dir)
+    # dataset = [{}]
+    if key_columns is not None:
+        dataset = [
+            {key: row[key] for key in key_columns}
+            for row in dataset
+        ]
     return MappingDataset(data=dataset, transform=transform)
 
 
@@ -173,7 +184,11 @@ def build_iterative_dataset(
         raise ValueError(f"{file_extenstion} files are not supported.")
 
     file_extenstion = "json" if file_extenstion == "jsonl" else file_extenstion
-    dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace, streaming=True)
+    cache_dir = os.getenv("HF_CACHE_DIR", None)
+    if cache_dir is None:
+        dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace, streaming=True)
+    else:
+        dataset = load_dataset(file_extenstion, data_files=data_files, split=namespace, cache_dir=cache_dir, streaming=True)
     dataset = dataset.shuffle(seed=seed, buffer_size=10_000)
     dataset = split_dataset_by_node(dataset, parallel_state.dp_rank, parallel_state.dp_size)
 

@@ -33,7 +33,9 @@ class ReduceLoss(torch.autograd.Function):
         local_num_tokens = num_valid_tokens.detach().clone()
         loss *= num_valid_tokens
         group = get_unified_sequence_parallel_group()
-        dist.all_reduce(loss, group=group)
+        dist.all_reduce(loss, group=group) # (l1+l2)/ 2 / (total_length /2) = l1 + l2 / total_length
+        # [(x1  + x2) / total_length  + (x3 + x4) / total_length2 ]/ world_size. '
+        # expect: 
         dist.all_reduce(num_valid_tokens, group=group)
         ctx.save_for_backward(local_num_tokens, num_valid_tokens)
         return loss / num_valid_tokens
@@ -46,6 +48,22 @@ class ReduceLoss(torch.autograd.Function):
         grad_output = get_unified_sequence_parallel_world_size() * local_num_tokens * grad_output / global_num_tokens
         return grad_output, None
 
+
+class ReduceLoss2(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx: torch.autograd.Function, loss: torch.Tensor) -> torch.Tensor:
+        group = get_unified_sequence_parallel_group()
+        dist.all_reduce(loss, group=group, op=torch.distributed.ReduceOp.SUM) 
+        return loss 
+
+    @staticmethod
+    def backward(ctx: torch.autograd.Function, grad_output: torch.Tensor) -> torch.Tensor:
+        # group_size = torch.distributed.get_world_size(group)
+        group_size = get_parallel_state().sp_size 
+        # please note that loss.backward() still compute by loss at current rank of sequence.
+        # so we need to scale up grad_output by group_size
+        grad_output = grad_output  * group_size
+        return grad_output, None
 
 def reduce_sequence_parallel_loss(loss: torch.Tensor, num_valid_tokens: torch.Tensor) -> torch.Tensor:
     return ReduceLoss.apply(loss, num_valid_tokens)

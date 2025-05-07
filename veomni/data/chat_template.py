@@ -228,13 +228,23 @@ class ChatmlTemplate(ChatTemplate):
             content_ids = self.tokenizer.encode(content_str, add_special_tokens=False)
             input_ids += content_ids
             attention_mask += [1] * len(content_ids)
-            if message["loss_mask"] == 1:
-                labels += content_ids
+            if "loss_mask" in message:
+                if message["loss_mask"] == 1:
+                    labels += content_ids 
+                else:
+                    if message["role"] in ["user"]:
+                        print(f"warning: loss_mask is 0 but role is user")
+                    labels += [IGNORE_INDEX] * len(content_ids)
             else:
-                labels += [IGNORE_INDEX] * len(content_ids)
-
+                if message["role"] not in ["assistant", "tool"]:
+                    labels += [IGNORE_INDEX] * len(content_ids)
+                else:
+                    labels += content_ids
+                
+        assert len(input_ids) == len(attention_mask) == len(labels) 
+        # assert len(input_ids) <= max_seq_len, f'{len(input_ids)} > {max_seq_len}: {self.tokenizer.decode(input_ids)}'
         model_inputs = {"input_ids": input_ids, "attention_mask": attention_mask, "labels": labels}
-        model_inputs = {k: v[-max_seq_len:] for k, v in model_inputs.items()}
+        model_inputs = {k: v[:max_seq_len] for k, v in model_inputs.items()}
         return model_inputs
 
     def get_jinja_template(self) -> str:

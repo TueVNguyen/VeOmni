@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Callable, Dict, Generator, List, Literal, Optional, Sequence, Tuple, Union
 
 import torch
-from hdfs_io import hput
+# from hdfs_io import hput
 from torch import distributed as dist
 from torch import nn
 from tqdm import tqdm

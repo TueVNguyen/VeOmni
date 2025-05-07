@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Union
 
 import torch
 
+import requests
 
 if TYPE_CHECKING:
     from transformers import PreTrainedTokenizer
@@ -69,11 +70,20 @@ def process_pretrain_example(
     return examples
 
 
+def get_embedding(text: str, external_api_url: str) -> List[float]:
+    response = requests.post(
+        external_api_url,
+        json={"model": "", "input": text},
+    )
+    text_embedding = response.json()["data"][0]["embedding"]
+    return text_embedding
+
 def process_sft_example(
     example: Dict[str, Any],
     chat_template: "ChatTemplate",
     max_seq_len: int,
     text_keys: Union[str, List[str]] = "messages",
+    external_api_url: Optional[str] = None,
 ) -> List[Dict[str, "torch.Tensor"]]:
     if isinstance(text_keys, str):
         text_example = example[text_keys]
@@ -88,5 +98,5 @@ def process_sft_example(
         raise ValueError(f"text_keys must be a string or a list of strings, but got {type(text_keys)}")
 
     tokenized_example = chat_template.encode_messages(text_example, max_seq_len=max_seq_len)
-    tokenized_example = {k: torch.tensor(v) for k, v in tokenized_example.items()}
-    return [tokenized_example]
+    tokenized_example = {k: torch.tensor(v).clone() for k, v in tokenized_example.items()}
+    return tokenized_example
