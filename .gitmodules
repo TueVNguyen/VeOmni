@@ -1,0 +1,3 @@
+[submodule "veScale"]
+	path = veScale
+	url = https://github.com/volcengine/veScale.git

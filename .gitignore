@@ -124,7 +124,7 @@ generation_config.json
 *.safetensors
 pytorch_model.bin.index.json
 model.safetensors.index.json
-log*
+# log*
 veomni_cli.yaml
 demo.parquet
 

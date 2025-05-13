@@ -12,7 +12,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import deepseek_v3, llama, qwen2, qwen2_vl, qwen3, qwen3_moe
+from torch.distributed._tensor import Shard
 
+from ....distributed.parallel_plan import ParallelPlan
 
-__all__ = ["qwen2_vl", "deepseek_v3", "qwen2", "llama", "qwen3", "qwen3_moe"]
+# Todo: add tensor parallel plan
+
+def get_paralle_plan():
+    ep_plan = {
+        "model.layers.*.mlp.experts.gate_proj": Shard(0),
+        "model.layers.*.mlp.experts.down_proj": Shard(0),
+        "model.layers.*.mlp.experts.up_proj": Shard(0),
+    }
+    parallel_plan = ParallelPlan(
+        ep_plan=ep_plan,
+    )
+    return parallel_plan
+
+def get_tensor_parallel_plan():
+    pass

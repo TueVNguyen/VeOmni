@@ -38,7 +38,16 @@ if TYPE_CHECKING:
 logger = logging.get_logger(__name__)
 
 _PARALLEL_STATE: "ParallelState" = None
-
+_MESH_DIM_MAP_NAME_VESCALE = {
+    "dp": "DP",
+    "tp": "TP",
+    "pp": "PP",
+    "cp": "CP",
+    "ulysses": "ULY",
+    "ep": "EP",
+    "ep_dp": "EP_DP",
+    
+}
 
 def requires_mesh(fn: Callable) -> Callable:
     @wraps(fn)
@@ -87,13 +96,13 @@ class ParallelState:
             )
 
             if self.sp_device_mesh is not None:
-                set_data_parallel_group(self.sp_device_mesh.get_group("dp"))
+                set_data_parallel_group(self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["dp"]))
                 if self.ulysses_size > 1:
-                    set_ulysses_sequence_parallel_group(self.sp_device_mesh.get_group("ulysses"))
+                    set_ulysses_sequence_parallel_group(self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["ulysses"]))
                 if self.cp_size > 1:
-                    set_context_parallel_group(self.sp_device_mesh.get_group("cp"))
+                    set_context_parallel_group(self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["cp"]))
                 # set unified sequence parallel group
-                set_unified_sequence_parallel_group(self.usp_device_mesh.get_group("sp"))
+                set_unified_sequence_parallel_group(self.usp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["sp"]))
             else:
                 init_sequence_parallel(
                     ulysses_size=self.ulysses_size,
@@ -126,7 +135,7 @@ class ParallelState:
     @property
     def dp_group(self) -> Optional["ProcessGroup"]:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_group("dp")
+            return self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["dp"])
 
         if self.sp_enabled:
             from ..distributed.sequence_parallel import get_data_parallel_group
@@ -138,7 +147,7 @@ class ParallelState:
     @property
     def dp_rank(self) -> int:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_local_rank("dp")
+            return self.sp_device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["dp"])
 
         if self.sp_enabled:
             from ..distributed.sequence_parallel import get_data_parallel_rank
@@ -151,7 +160,7 @@ class ParallelState:
     @requires_mesh
     def dp_mesh(self) -> "DeviceMesh":
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh["dp"]
+            return self.sp_device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
 
         raise self.fsdp_mesh
 
@@ -163,19 +172,19 @@ class ParallelState:
     @property
     def fsdp_group(self) -> Optional["ProcessGroup"]:
         if self.device_mesh is not None:
-            return self.device_mesh.get_group("dp")
+            return self.device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["dp"])
 
     @property
     def fsdp_rank(self) -> int:
         if self.device_mesh is not None:
-            return self.device_mesh.get_local_rank("dp")
+            return self.device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["dp"])
 
         return self.global_rank
 
     @property
     @requires_mesh
     def fsdp_mesh(self) -> "DeviceMesh":
-        return self.device_mesh["dp"]
+        return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
 
     @property
     def fsdp_enabled(self) -> bool:
@@ -189,12 +198,12 @@ class ParallelState:
     @property
     @requires_mesh
     def tp_rank(self) -> int:
-        return self.device_mesh.get_local_rank("tp")
+        return self.device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["tp"])
 
     @property
     @requires_mesh
     def tp_mesh(self) -> "DeviceMesh":
-        return self.device_mesh["tp"]
+        return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["tp"]]
 
     @property
     def tp_enabled(self) -> bool:
@@ -204,12 +213,12 @@ class ParallelState:
     @property
     @requires_mesh
     def pp_rank(self) -> int:
-        return self.device_mesh.get_local_rank("pp")
+        return self.device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["pp"])
 
     @property
     @requires_mesh
     def pp_mesh(self) -> "DeviceMesh":
-        return self.device_mesh["pp"]
+        return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["pp"]]
 
     @property
     def pp_enabled(self) -> bool:
@@ -229,12 +238,12 @@ class ParallelState:
     @property
     @requires_mesh
     def ep_mesh(self) -> "DeviceMesh":
-        return self.ep_device_mesh["ep"]
+        return self.ep_device_mesh[_MESH_DIM_MAP_NAME_VESCALE["ep"]]
 
     @property
     @requires_mesh
     def ep_group(self) -> "ProcessGroup":
-        return self.ep_mesh.get_group()
+        return self.ep_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["ep"])
 
     @property
     def ep_enabled(self) -> bool:
@@ -244,7 +253,7 @@ class ParallelState:
     @property
     def sp_group(self) -> Optional["ProcessGroup"]:
         if self.usp_device_mesh is not None:
-            return self.usp_device_mesh.get_group("sp")
+            return self.usp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["sp"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_unified_sequence_parallel_group
@@ -256,7 +265,7 @@ class ParallelState:
     @property
     def sp_rank(self) -> int:
         if self.usp_device_mesh is not None:
-            return self.usp_device_mesh.get_local_rank("sp")
+            return self.usp_device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["sp"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_unified_sequence_parallel_rank
@@ -276,7 +285,7 @@ class ParallelState:
     @property
     def ulysses_group(self) -> Optional["ProcessGroup"]:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_group("ulysses")
+            return self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["ulysses"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_ulysses_sequence_parallel_group
@@ -288,7 +297,7 @@ class ParallelState:
     @property
     def ulysses_rank(self) -> int:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_local_rank("ulysses")
+            return self.sp_device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["ulysses"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_ulysses_sequence_parallel_rank
@@ -304,7 +313,7 @@ class ParallelState:
     @property
     def cp_group(self) -> Optional["ProcessGroup"]:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_group("cp")
+            return self.sp_device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["cp"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_context_parallel_group
@@ -316,7 +325,7 @@ class ParallelState:
     @property
     def cp_rank(self) -> int:
         if self.sp_device_mesh is not None:
-            return self.sp_device_mesh.get_local_rank("cp")
+            return self.sp_device_mesh.get_local_rank(_MESH_DIM_MAP_NAME_VESCALE["cp"])
 
         if self.sp_enabled:
             from .sequence_parallel import get_context_parallel_rank
@@ -355,18 +364,18 @@ def init_parallel_state(
         device_mesh = init_device_mesh(
             device_type=device_type,
             mesh_shape=(pp_size, fsdp_size, tp_size),
-            mesh_dim_names=("pp", "dp", "tp"),
+            mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["pp"], _MESH_DIM_MAP_NAME_VESCALE["dp"], _MESH_DIM_MAP_NAME_VESCALE["tp"]),
         )
         if ulysses_size > 1 or cp_size > 1:
             sp_device_mesh = init_device_mesh(
                 device_type=device_type,
                 mesh_shape=(dp_size, cp_size, ulysses_size),
-                mesh_dim_names=("dp", "cp", "ulysses"),
+                mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["dp"], _MESH_DIM_MAP_NAME_VESCALE["cp"], _MESH_DIM_MAP_NAME_VESCALE["ulysses"]),
             )
             usp_device_mesh = init_device_mesh(
                 device_type=device_type,
                 mesh_shape=(dp_size, cp_size * ulysses_size),
-                mesh_dim_names=("dp", "sp"),
+                mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["dp"], _MESH_DIM_MAP_NAME_VESCALE["sp"]),
             )
         # TODO: support ep_size != dp_size
         if ep_size > 1:
@@ -375,7 +384,7 @@ def init_parallel_state(
             ep_device_mesh = init_device_mesh(
                 device_type=device_type,
                 mesh_shape=(pp_size, ep_dp_size, ep_size, tp_size),
-                mesh_dim_names=("pp", "ep_dp", "ep", "tp"),
+                mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["pp"], _MESH_DIM_MAP_NAME_VESCALE["ep_dp"], _MESH_DIM_MAP_NAME_VESCALE["ep"], _MESH_DIM_MAP_NAME_VESCALE["tp"]),
             )
 
     _PARALLEL_STATE = ParallelState(
