@@ -51,7 +51,14 @@ from ....distributed.sequence_parallel import (
 )
 from ....utils import logging
 from ....utils.import_utils import is_liger_kernel_available
-
+from torch.distributed.tensor import (
+    DeviceMesh,
+    distribute_module,
+    distribute_tensor,
+    DTensor,
+    Replicate,
+    Shard,
+)
 
 if is_liger_kernel_available():
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss, LigerCrossEntropyLoss  # type: ignore
@@ -221,8 +228,17 @@ class Qwen3Attention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, self.head_dim)
         bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
-
-        query_states = self.q_norm(self.q_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
+        # from veomni.utils.dist_utils import main_process_first
+        # with main_process_first():
+        # if torch.distributed.get_rank() == 0:
+        rank = torch.distributed.get_rank()
+        # if rank==0:
+            # print("position_ids: ", kwargs.get("position_ids"))
+        hidden_states = hidden_states.view(bsz * q_len, -1)
+        # print(f"hidden_states: {rank} ", hidden_states.shape, self.q_proj.weight.shape)
+        # q_out = self.q_proj(hidden_states).view(hidden_shape)
+        query_states = self.q_proj(hidden_states).view(hidden_shape)
+        query_states = self.q_norm(query_states).transpose(1, 2)
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
         value_states = self.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
@@ -249,7 +265,12 @@ class Qwen3Attention(nn.Module):
                 )
             else:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+        if get_parallel_state().tp_size > 1:
+            query_states = query_states.to_local()
+            key_states = key_states.to_local()
+            if "position_ids" in kwargs:
+                kwargs["position_ids"] = kwargs["position_ids"].to_local()
+            # value_states = value_states.to_local()
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -266,6 +287,7 @@ class Qwen3Attention(nn.Module):
             attn_output = gather_heads_scatter_seq(attn_output, head_dim=2, seq_dim=1)
         attn_output = attn_output.reshape(*input_shape, -1).contiguous()
         attn_output = self.o_proj(attn_output)
+        # print("done")
         return attn_output, attn_weights
 
 
@@ -298,17 +320,27 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
+        # if torch.distributed.get_rank() == 0:
+            # print("hidden_states: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
         hidden_states = self.input_layernorm(hidden_states)
-
+        # if torch.distributed.get_rank() == 0:
+            # print("hidden_states after input_layernorm: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
         # Self Attention
+        # print(kwargs)
+        # print(position_embeddings[0].shape, position_embeddings[1].shape, attention_mask.shape, position_ids.shape, hidden_states.shape)
         hidden_states, self_attn_weights = self.self_attn(
+            # hidden_states,
+            # position_embeddings,
+            # attention_mask,
+            # past_key_value,
+            # cache_position,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
+            # past_key_value=past_key_value,
+            # output_attentions=output_attentions,
+            # # use_cache=use_cache,
+            # # cache_position=cache_position,
             position_embeddings=position_embeddings,
             **kwargs,
         )
@@ -316,8 +348,11 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
 
         # Fully Connected
         residual = hidden_states
+        # print("hidden_states: ", hidden_states.shape)
         hidden_states = self.post_attention_layernorm(hidden_states)
+        # print("hidden_states after post_attention_layernorm: ", hidden_states.shape)
         hidden_states = self.mlp(hidden_states)
+        # print("hidden_states after mlp: ", hidden_states.shape)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -397,6 +432,9 @@ class Qwen3RotaryEmbedding(nn.Module):
     @torch.no_grad()
     @dynamic_rope_update  # power user: used with advanced RoPE types (e.g. dynamic rope)
     def forward(self, x, position_ids):
+        # if torch.distributed.get_rank() == 0 or torch.distributed.get_rank() == 1:
+            # print("x: ", x.shape)
+            # print("position_ids: ", torch.distributed.get_rank(), position_ids)
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
 
@@ -406,7 +444,8 @@ class Qwen3RotaryEmbedding(nn.Module):
             emb = torch.cat((freqs, freqs), dim=-1)
             cos = emb.cos() * self.attention_scaling
             sin = emb.sin() * self.attention_scaling
-
+        # print("cos: ", cos.shape)
+        # print("sin: ", sin.shape)
         return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
 
 
@@ -548,9 +587,12 @@ class Qwen3Model(Qwen3PreTrainedModel):
         if not isinstance(past_key_values, (type(None), Cache)):
             raise ValueError("The `past_key_values` should be either a `Cache` object or `None`.")
 
+
         if inputs_embeds is None:
             inputs_embeds = self.embed_tokens(input_ids)
-
+        # if torch.distributed.get_rank() == 0:
+            # print("input_ids: ", input_ids)
+            # print("inputs_embeds: ", inputs_embeds.shape)
         if use_cache and past_key_values is None:
             past_key_values = DynamicCache()
 
@@ -571,11 +613,9 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-
-        # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-
+        
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -800,6 +840,15 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
 
+    def set_enable_gradient_checkpointing_partial(self, gradient_checkpointing_kwargs={}, n_layers=24):
+        import functools
+        from torch.utils.checkpoint import checkpoint
+        gradient_checkpointing_func = functools.partial(checkpoint, **gradient_checkpointing_kwargs)
+        # self.model.layers
+        for layer in self.model.layers[:n_layers]:
+            layer._gradient_checkpointing_func = gradient_checkpointing_func
+            layer.gradient_checkpointing = True
+
     @can_return_tuple
     @add_start_docstrings_to_model_forward(QWEN3_INPUTS_DOCSTRING)
     @replace_return_docstrings(output_type=CausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
@@ -935,6 +984,29 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
             hidden_states=outputs.hidden_states,
             attentions=outputs.attentions,
         )
+    # def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func: Callable = checkpoint):
+    # def _set_gradient_checkpointing(self, enable: bool = True, gradient_checkpointing_func: Callable = checkpoint):
+    #     is_gradient_checkpointing_set = False
+
+    #     # Apply it on the top-level module in case the top-level modules supports it
+    #     # for example, LongT5Stack inherits from `PreTrainedModel`.
+    #     if hasattr(self, "gradient_checkpointing"):
+    #         self._gradient_checkpointing_func = gradient_checkpointing_func
+    #         self.gradient_checkpointing = enable
+    #         is_gradient_checkpointing_set = True
+
+    #     for module in self.modules():
+    #         print(module)
+    #         if hasattr(module, "gradient_checkpointing"):
+    #             module._gradient_checkpointing_func = gradient_checkpointing_func
+    #             module.gradient_checkpointing = enable
+    #             is_gradient_checkpointing_set = True
+
+    #     if not is_gradient_checkpointing_set:
+    #         raise ValueError(
+    #             f"{self.__class__.__name__} is not compatible with gradient checkpointing. Make sure all the architecture support it by setting a boolean attribute"
+    #             " `gradient_checkpointing` to modules of the model that uses checkpointing."
+    #         )
 
 if is_liger_kernel_available():
     apply_rotary_pos_emb = liger_rotary_pos_emb

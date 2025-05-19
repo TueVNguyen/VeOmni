@@ -174,6 +174,7 @@ def main():
         basic_modules=model._no_split_modules + args.model.basic_modules,
         enable_reentrant=args.train.enable_reentrant,
         enable_forward_prefetch=args.train.enable_forward_prefetch,
+        n_layer_gradient_checkpointing=args.train.n_layer_gradient_checkpointing,
     )
     #, dynamic=True) # for batch_size shape == 1, we allway using packing.
     optimizer = build_optimizer(

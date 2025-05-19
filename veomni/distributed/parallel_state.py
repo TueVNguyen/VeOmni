@@ -360,6 +360,7 @@ def init_parallel_state(
 
     device_mesh, sp_device_mesh, usp_device_mesh, ep_device_mesh = None, None, None, None
     if is_torch_version_greater_than("2.4"):
+        print("init_parallel_state here")
         fsdp_size = dist.get_world_size() // (pp_size * tp_size)
         device_mesh = init_device_mesh(
             device_type=device_type,

@@ -33,7 +33,8 @@ logger = logging.get_logger(__name__)
 
 
 def parallel_load_safetensors(
-    filepath: str, specific_param_name: list[str] = None, ignore_param_name: list[str] = None
+    filepath: str, specific_param_name: list[str] = None, ignore_param_name: list[str] = None,
+    force_load_all: bool = False,
 ):
     assert not (specific_param_name is not None and ignore_param_name is not None)
 
@@ -61,6 +62,8 @@ def parallel_load_safetensors(
     total_files = len(safetensors2param)
     ckpt_chunks = sorted(safetensors2param.keys())
     world_size = dist.get_world_size()
+    if force_load_all:
+        world_size = 1
     size = int(math.ceil(total_files / world_size))
     ckpt_chunks = [ckpt_chunks[i * size : (i + 1) * size] for i in range(world_size)]
 

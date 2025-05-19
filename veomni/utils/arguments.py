@@ -291,6 +291,10 @@ class TrainingArguments:
         default=True,
         metadata={"help": "Enable gradient checkpointing."},
     )
+    n_layer_gradient_checkpointing: int = field(
+        default=24,
+        metadata={"help": "Number of layers to enable gradient checkpointing."},
+    )
     enable_reentrant: bool = field(
         default=False,
         metadata={"help": "Use reentrant gradient checkpointing."},
