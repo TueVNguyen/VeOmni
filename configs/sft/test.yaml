@@ -1,0 +1,52 @@
+model:
+  model_path: "/mnt/sharefs/tuenv/model_hub/qwen3/Qwen3-32B"
+  attn_implementation: flash_attention_2
+  tokenizer_path: "/mnt/sharefs/tuenv/model_hub/qwen3/Qwen3-32B"
+
+data:
+  train_path: test_all_ds_dedup_if
+  data_type: conversation
+  chat_template: chatml
+  max_seq_len: 16384
+  train_size: 1884476181 # 5epoch 7,679,732,074 1,139,111,100 329,724,320
+  text_keys: messages
+  pin_memory: false
+  drop_last: true
+  is_chatml: false
+  corss_pack: 5000
+
+train:
+  output_dir: test_qwen32b
+  data_parallel_mode: fsdp2
+  ulysses_parallel_size: 1
+  global_batch_size: 64
+  micro_batch_size: 1
+  token_micro_bsz: 42768
+  num_train_epochs: 5
+  rmpad: false
+  rmpad_with_pos_ids: true
+  bsz_warmup_ratio: 0.
+  dyn_bsz_margin: 0
+  dyn_bsz_buffer_size: 1
+  optimizer: adamw
+  lr: 2.0e-5
+  lr_warmup_ratio: 0.1
+  lr_decay_style: cosine
+  lr_decay_ratio: 1.0
+  weight_decay: 0.1
+  max_grad_norm: 2.0
+  enable_mixed_precision: true
+  enable_gradient_checkpointing: true
+  n_layer_gradient_checkpointing: 64
+  enable_full_shard: true
+  enable_fsdp_offload: false
+  enable_activation_offload: false
+  init_device: meta
+  enable_full_determinism: false
+  empty_cache_steps: 2000
+  ckpt_manager: dcp
+  load_checkpoint_path: ""
+  save_steps: 1000
+  save_hf_weights: true
+  wandb_project: medical_training_v2
+  wandb_name: 32b_densen_qwen_all_traces

@@ -1,3 +1,6 @@
 [submodule "veScale"]
 	path = veScale
 	url = https://github.com/volcengine/veScale.git
+[submodule "ByteCheckpoint"]
+	path = ByteCheckpoint
+	url = https://github.com/TueVNguyen/ByteCheckpoint.git

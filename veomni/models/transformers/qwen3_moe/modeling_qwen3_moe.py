@@ -20,7 +20,7 @@ from torch import nn
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS, dynamic_rope_update
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS, PreTrainedModel
 from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
-from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
+
 # from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.processing_utils import Unpack
 from transformers.utils import (
@@ -45,7 +45,7 @@ from ....utils import logging
 from ....utils.import_utils import is_liger_kernel_available
 
 from ....distributed.moe import EPGroupGemm, fused_moe_forward, preprocess, token_pre_all2all, tokens_post_all2all
-
+from .qwen3_config import Qwen3MoeConfig
 if is_liger_kernel_available():
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss, LigerCrossEntropyLoss  # type: ignore
     from liger_kernel.transformers.functional import liger_cross_entropy
@@ -150,7 +150,6 @@ class Qwen3MoeMLP(nn.Module):
         down_proj = self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
         return down_proj
 
-# class LigerSwiGLUMLP()
 
 class Qwen3MoeRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -244,7 +243,11 @@ class Qwen3MoeAttention(nn.Module):
                 )
             else:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
-
+        if get_parallel_state().tp_size > 1:
+            query_states = query_states.to_local()
+            key_states = key_states.to_local()
+            if "position_ids" in kwargs:
+                kwargs["position_ids"] = kwargs["position_ids"].to_local()
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -264,6 +267,7 @@ class Qwen3MoeAttention(nn.Module):
         attn_output = self.o_proj(attn_output)
         return attn_output, attn_weights
 
+# We need to change the sparse moe block to simple form MLP
 
 class Qwen3MoeSparseMoeBlock(nn.Module):
     def __init__(self, config):
@@ -271,18 +275,21 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
         self.norm_topk_prob = config.norm_topk_prob
-
+        
         # gating
         self.gate = nn.Linear(config.hidden_size, config.num_experts, bias=False)
-        self.experts = nn.ModuleList(
-            [Qwen3MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
-        )
+        if config.use_expert_parallel_plan:
+            self.experts = Qwen3MoeExpertParallelPlan(config)
+        else:
+            self.experts = nn.ModuleList(
+                [Qwen3MoeMLP(config, intermediate_size=config.moe_intermediate_size) for _ in range(self.num_experts)]
+            )
+
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """ """
         batch_size, sequence_length, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
-        # router_logits: (batch * sequence_length, n_experts)
         router_logits = self.gate(hidden_states)
 
         routing_weights = F.softmax(router_logits, dim=1, dtype=torch.float)
@@ -299,8 +306,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
         expert_mask = torch.nn.functional.one_hot(selected_experts, num_classes=self.num_experts).permute(2, 1, 0)
         if self.training and get_parallel_state().ep_enabled:
             # Implement the expert parallel plan for qwen3 moe
-            
-
+            raise NotImplementedError("Expert parallel plan for qwen3 moe is not implemented, Please change the config to qwen3_moe_parallel is will implement different to simple moe block")
+            # print("Start fusion ep here")
             input_splits, output_splits, num_global_tokens_per_local_expert, num_global_sum_tokens_per_local_expert = (
                 preprocess(
                     expert_mask=expert_mask,
@@ -308,7 +315,7 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                     ep_group=get_parallel_state().ep_group,
                 )
             )
-
+            # print("Start token_pre_all2all")
             permute_tokens, routing_map, local_input_permutation_mapping, org_hidden_states_shape = token_pre_all2all(
                 hidden_states=hidden_states,
                 expert_mask=expert_mask,
@@ -319,7 +326,8 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 ep_group=get_parallel_state().ep_group,
             )
             cumsum = torch.cat([torch.tensor([0]), num_global_sum_tokens_per_local_expert.cumsum(dim=0)])
-
+            
+            # print("Start cumsum")
             # Loop over all available experts in the model and perform the computation on each expert
             final_permute_tokens = torch.zeros(
                 (permute_tokens.shape),
@@ -330,10 +338,11 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             for expert_idx in range(num_local_experts):
                 start_idx = cumsum[expert_idx]
                 end_idx = cumsum[expert_idx + 1]
-
-                current_permute_tokens = permute_tokens[start_idx:end_idx]
-                final_permute_tokens[start_idx:end_idx] = self.experts(current_permute_tokens, index=expert_idx)
+                if current_tokens_for_this_expert.numel() > 0: 
+                    current_permute_tokens = permute_tokens[start_idx:end_idx]
+                    final_permute_tokens[start_idx:end_idx] = self.experts(current_permute_tokens, index=expert_idx)
             # unpermute with routing_weight
+            # print("Start unpermute with routing_weight")
             unpermute_tokens = tokens_post_all2all(
                 expert_outputs=final_permute_tokens,
                 routing_weights=routing_weights,
@@ -347,7 +356,9 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
                 org_hidden_states_shape=org_hidden_states_shape,
                 ep_group=get_parallel_state().ep_group,
             )
+            # print("Start unpermute with routing_weight done")
             y = unpermute_tokens.to(hidden_states.dtype).view(batch_size, sequence_length, hidden_dim)
+            # We need to calculate the loss expert here     
             return y, router_logits
         else:
             final_hidden_states = torch.zeros(
@@ -355,20 +366,74 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             )
             # Loop over all available experts in the model and perform the computation on each expert
             for expert_idx in range(self.num_experts):
-                expert_layer = self.experts[expert_idx]
+                
                 idx, top_x = torch.where(expert_mask[expert_idx])
 
                 # Index the correct hidden states and compute the expert hidden state for
                 # the current expert. We need to make sure to multiply the output hidden
                 # states by `routing_weights` on the corresponding tokens (top-1 and top-2)
                 current_state = hidden_states[None, top_x].reshape(-1, hidden_dim)
-                current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
+                if self.config.use_expert_parallel_plan:
+                    current_hidden_states = self.experts(current_state, index=expert_idx)
+                else:
+                    expert_layer = self.experts[expert_idx]
+                    current_hidden_states = expert_layer(current_state) * routing_weights[top_x, idx, None]
 
                 # However `index_add_` only support torch tensors for indexing so we'll use
                 # the `top_x` tensor here.
                 final_hidden_states.index_add_(0, top_x, current_hidden_states.to(hidden_states.dtype))
             final_hidden_states = final_hidden_states.reshape(batch_size, sequence_length, hidden_dim)
             return final_hidden_states, router_logits
+
+
+class Qwen3MoeExpertParallelPlan(nn.Module):
+    def __init__(self, config, intermediate_size=None):
+        super().__init__()
+        self.num_experts = config.num_experts
+        self.top_k = config.num_experts_per_tok
+        self.norm_topk_prob = config.norm_topk_prob
+        
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = intermediate_size if intermediate_size is not None else config.intermediate_size
+        
+        self.gate_proj = torch.nn.Parameter(
+            torch.empty(config.num_experts, self.intermediate_size, self.hidden_size),
+            requires_grad=True,
+        )
+        self.up_proj = torch.nn.Parameter(
+            torch.empty(config.num_experts, self.intermediate_size, self.hidden_size),
+            requires_grad=True,
+        )
+        self.down_proj = torch.nn.Parameter(
+            torch.empty(config.num_experts, self.hidden_size, self.intermediate_size),
+            requires_grad=True,
+        )
+        self.act_fn = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_states: torch.Tensor, index=None, cumsum=None) -> torch.Tensor:
+        if cumsum is not None:
+            assert self.training and get_parallel_state().ep_enabled
+            final_permute_tokens = EPGroupGemm.apply(
+                hidden_states,
+                cumsum,
+                self.gate_proj,
+                self.up_proj,
+                self.down_proj,
+            )
+            return final_permute_tokens
+        elif index is not None:
+            fc1_1_out = torch.matmul(hidden_states, self.gate_proj[index].transpose(0, 1))
+            fc1_2_out = torch.matmul(hidden_states, self.up_proj[index].transpose(0, 1))
+            if is_liger_kernel_available():
+                fc1_out = LigerSiLUMulFunction.apply(fc1_1_out, fc1_2_out)
+            else:
+                fc1_out = self.act_fn(fc1_1_out) * fc1_2_out
+            fc2_out = torch.matmul(fc1_out, self.down_proj[index].transpose(0, 1))
+
+            return fc2_out
+        else:
+            raise NotImplementedError("Only support index and cumsum")
+
 
 class Qwen3MoeDecoderLayer(nn.Module):
     def __init__(self, config: Qwen3MoeConfig, layer_idx: int):
@@ -380,6 +445,7 @@ class Qwen3MoeDecoderLayer(nn.Module):
         if (layer_idx not in config.mlp_only_layers) and (
             config.num_experts > 0 and (layer_idx + 1) % config.decoder_sparse_step == 0
         ):
+            
             self.mlp = Qwen3MoeSparseMoeBlock(config)
         else:
             self.mlp = Qwen3MoeMLP(config, intermediate_size=config.intermediate_size)
@@ -430,16 +496,33 @@ class Qwen3MoeDecoderLayer(nn.Module):
         hidden_states = self.input_layernorm(hidden_states)
 
         # Self Attention
+        # hidden_states, self_attn_weights = self.self_attn(
+        #     hidden_states=hidden_states,
+        #     attention_mask=attention_mask,
+        #     position_ids=position_ids,
+        #     past_key_value=past_key_value,
+        #     output_attentions=output_attentions,
+        #     use_cache=use_cache,
+        #     cache_position=cache_position,
+        #     position_embeddings=position_embeddings,
+        # )
         hidden_states, self_attn_weights = self.self_attn(
+            # hidden_states,
+            # position_embeddings,
+            # attention_mask,
+            # past_key_value,
+            # cache_position,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_value=past_key_value,
-            output_attentions=output_attentions,
-            use_cache=use_cache,
-            cache_position=cache_position,
+            # past_key_value=past_key_value,
+            # output_attentions=output_attentions,
+            # # use_cache=use_cache,
+            # # cache_position=cache_position,
             position_embeddings=position_embeddings,
+            **kwargs,
         )
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
@@ -1031,7 +1114,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         self.router_aux_loss_coef = config.router_aux_loss_coef
         self.num_experts = config.num_experts
         self.num_experts_per_tok = config.num_experts_per_tok
-
+        self.loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
+        # self.loss_fct = torch.compile(self.loss_fct, fullgraph=True)
         # Initialize weights and apply final processing
         self.post_init()
 
@@ -1162,7 +1246,8 @@ class Qwen3MoeForCausalLM(Qwen3MoePreTrainedModel, GenerationMixin):
         if labels is not None:
             labels = labels.view(-1)  # flatten label
             if is_liger_kernel_available():
-                loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="none")
+                # loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="none")
+                loss_fct = self.loss_fct
                 if not get_parallel_state().sp_enabled:
                     # Shift so that tokens < n predict n
                     hidden_states = hidden_states[..., :-1, :].contiguous()

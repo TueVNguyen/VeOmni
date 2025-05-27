@@ -14,6 +14,7 @@
 
 # adapted from https://github.com/huggingface/transformers/blob/v4.49.0/src/transformers/models/qwen2/modeling_qwen2.py
 from typing import Callable, List, Optional, Tuple, Union
+from veomni.models.custom_ops.cut_your_ce import CutYourCE
 
 import torch
 from torch import nn
@@ -225,18 +226,13 @@ class Qwen3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
+
         input_shape = hidden_states.shape[:-1]
+        bsz, seq_len, _ = hidden_states.size()
         hidden_shape = (*input_shape, -1, self.head_dim)
         bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
-        # from veomni.utils.dist_utils import main_process_first
-        # with main_process_first():
-        # if torch.distributed.get_rank() == 0:
         rank = torch.distributed.get_rank()
-        # if rank==0:
-            # print("position_ids: ", kwargs.get("position_ids"))
         hidden_states = hidden_states.view(bsz * q_len, -1)
-        # print(f"hidden_states: {rank} ", hidden_states.shape, self.q_proj.weight.shape)
-        # q_out = self.q_proj(hidden_states).view(hidden_shape)
         query_states = self.q_proj(hidden_states).view(hidden_shape)
         query_states = self.q_norm(query_states).transpose(1, 2)
         key_states = self.k_norm(self.k_proj(hidden_states).view(hidden_shape)).transpose(1, 2)
@@ -270,6 +266,14 @@ class Qwen3Attention(nn.Module):
             key_states = key_states.to_local()
             if "position_ids" in kwargs:
                 kwargs["position_ids"] = kwargs["position_ids"].to_local()
+            if "cu_seq_lens_q" in kwargs:
+                kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_q"].to_local()
+            if "cu_seq_lens_k" in kwargs:
+                kwargs["cu_seq_lens_k"] = kwargs["cu_seq_lens_k"].to_local()
+            if "max_length_q" in kwargs:
+                kwargs["max_length_q"] = kwargs["max_length_q"].to_local()
+            if "max_length_k" in kwargs:
+                kwargs["max_length_k"] = kwargs["max_length_k"].to_local()
             # value_states = value_states.to_local()
         attn_output, attn_weights = attention_interface(
             self,
@@ -321,7 +325,7 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
         # if torch.distributed.get_rank() == 0:
-            # print("hidden_states: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
+            # print("hidden_states before input_layernorm: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
         hidden_states = self.input_layernorm(hidden_states)
         # if torch.distributed.get_rank() == 0:
             # print("hidden_states after input_layernorm: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
@@ -818,8 +822,8 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         self.model = Qwen3Model(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
-        # Initialize weights and apply final processing
+        self.loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="sum")
+        self.loss_fct = CutYourCE(reduction="sum")
         self.post_init()
 
     def get_input_embeddings(self):
@@ -865,6 +869,7 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         output_hidden_states: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
         logits_to_keep: Union[int, torch.Tensor] = 0,
+        loss_type: Optional[str] = "liger_fused", # "liger_fused", "cut_your_ce"
         **kwargs: Unpack[KwargsForCausalLM],
     ) -> CausalLMOutputWithPast:
         r"""
@@ -942,14 +947,13 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
         if labels is not None:
             labels = labels.view(-1)  # flatten label
             if is_liger_kernel_available():
-                loss_fct = LigerFusedLinearCrossEntropyLoss(reduction="none")
+                # loss_fct = CutYourCE(reduction="sum")
                 if not get_parallel_state().sp_enabled:
                     # Shift so that tokens < n predict n
                     hidden_states = hidden_states[..., :-1, :].contiguous()
 
                 hidden_states = hidden_states.view(-1, self.config.hidden_size)
-                loss = loss_fct(self.lm_head.weight, hidden_states, labels).sum()
-            
+                loss = self.loss_fct(self.lm_head.weight, hidden_states, labels).sum()
             else:
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
                 logits = self.lm_head(hidden_states)
@@ -1020,5 +1024,5 @@ ModelClass = Qwen3ForCausalLM
 __all__ = [
     "Qwen3ForCausalLM",
     "Qwen3Model",
-    "Qwen3PreTrainedModel"
+    "Qwen3PreTrainedModel",
 ]

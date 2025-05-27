@@ -22,13 +22,11 @@ def apply_tensor_parallel_plan(model: torch.nn.Module, tp_mesh):
             input_layouts=Replicate(), # input is replicated across shards
             output_layouts=Shard(1), # output is sharded split across shards
         ),
-        # "model.rotary_emb": 
-        # "model.rotary_emb": 
-        "model.norm": SequenceParallel(),
+        "model.norm": SequenceParallel(), 
         "model.lm_head": ColwiseParallel(
             input_layouts=Shard(1),
             output_layouts=Replicate()
-        )  
+        ) 
     }
     # Attention modules: follow the same pattern of megatron-lm
     model = parallelize_module(
@@ -42,7 +40,7 @@ def apply_tensor_parallel_plan(model: torch.nn.Module, tp_mesh):
         tp_mesh,
         {
             "rotary_emb": PrepareModuleOutput(
-                output_layouts=(Replicate(), Replicate()),
+                output_layouts=(Replicate(), Replicate()), # output is replicated across shards due to the attention make in the all sequence
                 desired_output_layouts=(Replicate(), Replicate()),
             )
         }
@@ -55,16 +53,24 @@ def apply_tensor_parallel_plan(model: torch.nn.Module, tp_mesh):
             "input_layernorm": SequenceParallel(),
             "self_attn": PrepareModuleInputTuple(
                 input_kwarg_layouts={
-                    "hidden_states": Replicate(),
+                    "hidden_states": Shard(1),
                     "position_embeddings": (Replicate(), Replicate()),
                     "attention_mask": Replicate(),
                     "position_ids": Replicate(),
+                    "cu_seq_lens_q": Replicate(),
+                    "cu_seq_lens_k": Replicate(),
+                    "max_length_q": Replicate(),
+                    "max_length_k": Replicate(),
                 },
                 desired_input_kwarg_layouts={
                     "hidden_states": Replicate(),
                     "position_embeddings": (Replicate(), Replicate()),
                     "attention_mask": Replicate(),
                     "position_ids": Replicate(),
+                    "cu_seq_lens_q": Replicate(),
+                    "cu_seq_lens_k": Replicate(),
+                    "max_length_q": Replicate(),
+                    "max_length_k": Replicate(),
                 },
                 # desired_input_layouts=(Replicate(), Replicate(), Replicate()),
             ),

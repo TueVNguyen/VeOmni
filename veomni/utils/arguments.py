@@ -363,6 +363,10 @@ class TrainingArguments:
         default=1,
         metadata={"help": "Ring-attn context parallel size."},
     )
+    hybrid_fsdp_size: int = field(
+        default=1,
+        metadata={"help": "Size of DDP dim when using HSDP"},
+    )
     ckpt_manager: Literal["bytecheckpoint", "dcp"] = field(
         default="bytecheckpoint",
         metadata={"help": "Checkpoint manager."},
@@ -435,6 +439,10 @@ class TrainingArguments:
         default=None,
         metadata={"help": "Token micro batch size. (for debug)"},
     )
+    enable_compile: bool = field(
+        default=False,
+        metadata={"help": "Enable compile."},
+    )
     def __post_init__(self):
         self._train_steps = -1
         self.local_rank = int(os.getenv("LOCAL_RANK"))
@@ -455,9 +463,10 @@ class TrainingArguments:
             raise ValueError("`rmpad` and `rmpad_with_pos_ids` cannot be both True.")
 
         # init method check
-        assert (
-            self.expert_parallel_size == 1 or self.init_device != "cpu"
-        ), "cpu init is not supported when enable ep. Please use `init_device = cuda` or `init_device = meta` instead."
+        # We fallback to cpu init, because we will load all the weights to cpu first in all processs 
+        # assert (
+        #     self.expert_parallel_size == 1 or self.init_device != "cpu"
+        # ), "cpu init is not supported when enable ep. Please use `init_device = cuda` or `init_device = meta` instead."
 
         # calculate gradient accumulation steps
         if self.global_batch_size is None:

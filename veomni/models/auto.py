@@ -72,8 +72,13 @@ def build_foundation_model(
         if moe_implementation not in ["eager", "fused"]:
             raise ValueError(f"Invalid moe_implementation: {moe_implementation}")
 
+    if "use_expert_parallel_plan" in config_kwargs:
+        use_expert_parallel_plan = config_kwargs["use_expert_parallel_plan"]
+        del config_kwargs["use_expert_parallel_plan"]
+    else:
+        use_expert_parallel_plan = False
     config = AutoConfig.from_pretrained(config_path, trust_remote_code=True, **config_kwargs)
-
+    config.use_expert_parallel_plan = use_expert_parallel_plan
     loader: Optional[BaseModelLoader] = get_loader(config)
 
     init_kwargs = {
@@ -83,7 +88,7 @@ def build_foundation_model(
         "trust_remote_code": True,
     }
 
-    if (init_device == "cpu" and get_parallel_state().global_rank != 0) or init_device == "meta":
+    if  init_device == "meta":
         empty_init = True
     else:
         empty_init = False

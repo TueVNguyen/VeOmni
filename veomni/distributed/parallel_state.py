@@ -44,6 +44,7 @@ _MESH_DIM_MAP_NAME_VESCALE = {
     "pp": "PP",
     "cp": "CP",
     "ulysses": "ULY",
+    "sp": "ULY",
     "ep": "EP",
     "ep_dp": "EP_DP",
     

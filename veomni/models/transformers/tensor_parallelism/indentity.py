@@ -50,7 +50,7 @@ class IndentityParallel(ParallelStyle):
         elif isinstance(input_tensor, torch.Tensor):
             # assume the input passed in already sharded on the sequence dim and create the DTensor
             return DTensor.from_local(
-                input_tensor, device_mesh, [Replicate()], run_check=False
+                input_tensor, device_mesh, [ Replicate()], run_check=False
             )
         else:
             raise ValueError(

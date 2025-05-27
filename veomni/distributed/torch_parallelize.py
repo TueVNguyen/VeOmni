@@ -22,7 +22,14 @@ from torch.distributed.fsdp import CPUOffload, FullyShardedDataParallel, MixedPr
 from torch.distributed.fsdp._runtime_utils import _lazy_init
 from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from torch import distributed as dist
+from torch.distributed._tensor import (
+    DeviceMesh,
+    distribute_tensor,
+    DTensor,
+    Replicate,
+    Shard,
+)
 from ..checkpoint import register_checkpoint_extension
 from ..utils import logging
 from ..utils.import_utils import is_torch_version_greater_than
@@ -59,7 +66,6 @@ def verbose_fsdp_grouping(model, prefix="", depth=0):
 
 def build_parallelize_model(
     model: "nn.Module",
-    sharding_plan: Optional[Dict[str, Any]] = None,
     enable_full_shard: bool = True,
     enable_mixed_precision: bool = True,
     enable_gradient_checkpointing: bool = True,
@@ -83,34 +89,43 @@ def build_parallelize_model(
 
     if enable_gradient_checkpointing and hasattr(model, "gradient_checkpointing_enable"):
         logger.info_rank0("Enable gradient checkpointing.")
-        # enable gradient checkpointing
-        # print(model.modules())
-        partial_module = 12
-        # for module in model.modules():
-            # if hasattr(module, "gradient_checkpointing"):
-                # # print(module)
-                # if partial_module > 0:
-                #     del module.gradient_checkpointing
-                #     partial_module -= 1
-        print(model)
+        # # enable gradient checkpointing
+        # # print(model.modules())
+        # partial_module = 12
+        # # for module in model.modules():
+        #     # if hasattr(module, "gradient_checkpointing"):
+        #         # # print(module)
+        #         # if partial_module > 0:
+        #         #     del module.gradient_checkpointing
+        #         #     partial_module -= 1
+        # print(model)
         # model.gradient_checkpointing_enable(
         #     gradient_checkpointing_kwargs={"use_reentrant": kwargs.pop("enable_reentrant", False)}
         # )
         model.set_enable_gradient_checkpointing_partial(
-            n_layers=kwargs.get("n_layer_gradient_checkpointing", 30),
+            n_layers=kwargs.get("n_layer_gradient_checkpointing", 64),
             gradient_checkpointing_kwargs={
                 "use_reentrant": kwargs.pop("enable_reentrant", False)
             }
         )
-
+    # if kwargs.get("enable_compile", False):
+        # for layer_id, transformer_block in model.model.layers.named_children():
+            # transformer_block_self_attn = torch.compile(transformer_block.self_attn, fullgraph=False, backend="inductor")
+            # transformer_block_mlp = torch.compile(transformer_block.mlp, fullgraph=False, backend="inductor", dynamic=False)
+            # input_layernorm = torch.compile(transformer_block.input_layernorm, fullgraph=False, backend="inductor")
+            # transformer_block.register_module("input_layernorm", input_layernorm)
+            # transformer_block.register_module("self_attn", transformer_block_self_attn)
+            # transformer_block.register_module("mlp", transformer_block_mlp)
+            # transformer_block_optimize = torch.compile(transformer_block, fullgraph=False, backend="inductor", dynamic=False)
+            # model.model.layers.register_module(layer_id, transformer_block_optimize)
     if parallel_state.tp_enabled:
         logger.info_rank0("Apply tensor parallel to the model.")
-        model = parallelize_module(
-            model,
-            device_mesh=parallel_state.tp_mesh,
-        )
+        fn_apply_tensor_parallel = model.APPLY_TENSOR_PARALLEL
+        fn_apply_tensor_parallel(model, device_mesh=parallel_state.tp_mesh)
 
     if parallel_state.ep_enabled:
+        if not hasattr(model, "get_parallel_plan"):
+            raise ValueError("model must have a `get_parallel_plan` method to enable expert parallel.")
         parallel_plan = model.get_parallel_plan()
         ep_param_suffix = parallel_plan.ep_param_suffix
 
@@ -122,10 +137,7 @@ def build_parallelize_model(
         logger.info_rank0(
             f"Apply expert parallel to the model successfully.\nEP no shard states in FSDP: {fsdp_no_shard_states_fqn}."
         )
-        # exit(0)
-        # return 
     else:
-        # return
         fqn2spec_info = None
         ep_param_suffix = None
         fsdp_no_shard_states = None
@@ -154,7 +166,7 @@ def build_parallelize_model(
 
             def apply_fsdp_to_decoder_blocks(module: "nn.Module") -> None:
                 if module.__class__.__name__ in basic_modules or module.__class__ in ignore_modules_in_mixed_precision:
-                    logger.debug(f"Apply FSDP2 to {module.__class__.__name__}.")
+                    logger.info(f"Apply FSDP2 to {module.__class__.__name__}.")
                     if module.__class__ in ignore_modules_in_mixed_precision:
                         fully_shard(module, **{k: v for k, v in fsdp_kwargs.items() if k != "mp_policy"})
                     else:
@@ -164,51 +176,29 @@ def build_parallelize_model(
                 model.apply(apply_fsdp_to_decoder_blocks)
 
             fully_shard(model, **fsdp_kwargs)
-
+            
             if kwargs.get("init_device") == "meta":
-                state_dict_ref = parallel_load_safetensors(state_dict_ref, force_load_all=True)
-                sharded_sd = {}
-                state_dict_shard = model.state_dict()
-                if parallel_state.global_rank() == 0:
-                    assert len(state_dict_ref) == len(state_dict_shard)
-                    sorted_keys_ref = sorted(state_dict_ref.keys())
-                    sorted_keys_model = sorted(model.state_dict().keys())
-                    assert all([key_ref == key_model for key_ref, key_model in zip(sorted_keys_ref, sorted_keys_model)])
-                    for key in sorted_keys_ref:
-                        full_param_ref = state_dict_ref[key]
-                        sharded_meta_param =state_dict_shard[key]
-
-                        fsdp_mesh = sharded_meta_param.device_mesh
-                        from torch.distributed import dist
-                        from torch.distributed._tensor import (
-                            DeviceMesh,
-                            distribute_tensor,
-                            DTensor,
-                            Replicate,
-                            Shard,
-                        )
-                        dist.broadcast(full_param_ref, src=0, group=fsdp_mesh)
-                        sharded_tensor = distribute_tensor(
-                            full_param_ref, fsdp_mesh, sharded_meta_param.placements
-                        )
-                        sharded_sd[key] = nn.Parameter(sharded_tensor)
-                else:
-                    sorted_params = sorted(state_dict_shard.keys())
-                    for param_name in sorted_params:
-                        sharded_meta_param = state_dict_shard[param_name]
-                        fsdp_mesh = sharded_meta_param.device_mesh
-                        full_tensor = torch.empty(
-                            sharded_meta_param.size(),
-                            device="cuda",
-                            dtype=sharded_meta_param.dtype,
-                        )
-                        dist.broadcast(full_tensor, src=0, group=fsdp_mesh)
-                        sharded_tensor = distribute_tensor(
-                            full_tensor, fsdp_mesh, sharded_meta_param.placements
-                        )
-                        sharded_sd[param_name] = nn.Parameter(sharded_tensor)
+                logger.info_rank0("Load weights from meta path.")
+                logger.info_rank0(
+                    f"Please note that, load weights from meta path with FSDP2 is very slow in current implementation.\nBecause It will load full state_dict weight from meta path across all the ranks, and re-shard to each process.\n"
+                    f"So, we recommend you to use `init_device=cuda` to speed up the initialization, if you can fit the model in memory."
+                )
+                weights_path = kwargs.pop("weights_path", None)
+                assert weights_path is not None, "`weights_path` must be provided when `init_device=meta`."
+                full_sd = parallel_load_safetensors(weights_path, force_load_all=True)
+                shared_sd = {}
+                meta_sharded_sd = model.state_dict()
+                from tqdm import tqdm
+                for param_name, full_tensor in tqdm(full_sd.items(), total=len(full_sd), desc="Loading weights from meta path"):
+                    sharded_meta_param = meta_sharded_sd.get(param_name)
+                    sharded_tensor = distribute_tensor(
+                        full_tensor,
+                        sharded_meta_param.device_mesh,
+                        sharded_meta_param.placements,
+                    )
+                    sharded_sd[param_name] = nn.Parameter(sharded_tensor)
                 model.load_state_dict(sharded_sd, assign=True)
-                
+                logger.info_rank0("Load weights from meta path successfully.")
         elif parallel_state.dp_mode == "fsdp1":
             wrap_policy = partial(
                 lambda_auto_wrap_policy, lambda_fn=lambda module: module.__class__.__name__ in basic_modules
@@ -261,7 +251,7 @@ def build_parallelize_model(
 
             if kwargs.pop("enable_forward_prefetch", False):
                 fsdp_kwargs["forward_prefetch"] = True
-
+            fsdp_kwargs["use_orig_params"] = kwargs.pop("use_orig_params", False)
             # FULLY_SHARD first
             model = FullyShardedDataParallel(model, **fsdp_kwargs)
 

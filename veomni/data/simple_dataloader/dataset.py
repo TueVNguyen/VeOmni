@@ -514,9 +514,14 @@ class DynBszBuffer:
                     - input_ids: torch.Tensor of shape (seq_len, )
                     - attention_mask: torch.Tensor of shape (seq_len, )
         """
-        self._buffer.append(item)
-        self._buffer_sample_lens.append(item["length"])
-        self.all_token_cnt += self._buffer_sample_lens[-1]
+        if isinstance(item, dict):
+            self._buffer.append(item)
+            self._buffer_sample_lens.append(item["length"])
+            self.all_token_cnt += self._buffer_sample_lens[-1]
+        else:
+            self._buffer.extend(item[0])
+            self._buffer_sample_lens.extend(item[1])
+            self.all_token_cnt += sum(item[1])
 
     def get_samples(self, n_token_per_iter: int, force: bool = True):
         """

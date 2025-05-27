@@ -43,6 +43,7 @@ class Arguments:
 
 
 def main():
+    import datetime
     args = parse_args(Arguments)
     logger.info(f"Process rank: {args.train.global_rank}, world size: {args.train.world_size}")
     logger.info_rank0(json.dumps(asdict(args), indent=2))
@@ -136,7 +137,7 @@ def main():
             bsz_warmup_init_mbtoken=args.train.bsz_warmup_init_mbtoken,
             dyn_bsz_margin=args.train.dyn_bsz_margin,
             dyn_bsz_buffer_size=args.train.dyn_bsz_buffer_size,
-            num_workers=args.data.num_workers,
+            num_workers=16,
             drop_last=args.data.drop_last,
             pin_memory=args.data.pin_memory,
             prefetch_factor=args.data.prefetch_factor,
@@ -176,10 +177,13 @@ def main():
         enable_forward_prefetch=args.train.enable_forward_prefetch,
         n_layer_gradient_checkpointing=args.train.n_layer_gradient_checkpointing,
     )
+    if args.train.enable_compile:
+        torch._inductor.config.reorder_for_peak_memory = False
+        model = torch.compile(model, fullgraph=False)
     #, dynamic=True) # for batch_size shape == 1, we allway using packing.
     optimizer = build_optimizer(
         model,
-        lr=args.train.lr,
+        lr=torch.tensor(args.train.lr).to("cuda"),
         weight_decay=args.train.weight_decay,
         fused=True,
         optimizer_type=args.train.optimizer,
@@ -253,8 +257,9 @@ def main():
         args.train.enable_activation_offload, args.train.enable_gradient_checkpointing, args.train.activation_gpu_limit
     )
     model.train()
+    # optimizer.step = torch.compile(optimizer.step, fullgraph=False)
     logger.info(
-        f"rank{args.train.local_rank} Start training, train_steps: {args.train.train_steps}, epochs: {args.train.num_train_epochs}"
+        f"rank{args.train.global_rank} Start training, train_steps: {args.train.train_steps}, epochs: {args.train.num_train_epochs}"
     )
 
     for epoch in range(start_epoch, args.train.num_train_epochs):
@@ -290,17 +295,57 @@ def main():
             ]) 
             # print(len(micro_batches), f'len(micro_batches)')
             # n_item = all_reduce(n_item, "sum")
-            n_item = torch.tensor(n_item, device="cuda")
+            # n_item = torch.tensor(n_item, device="cuda")
+            n_item = n_item.detach().to("cuda").view(-1,)
+            if global_step==1:
+                logger.info(
+                    f"rank{args.train.local_rank} Start reduce all cuda first time"
+                )
             torch.distributed.all_reduce(n_item, op=torch.distributed.ReduceOp.SUM)
             ddp_size = torch.distributed.get_world_size(get_parallel_state().fsdp_group)
             wolrd_size = torch.distributed.get_world_size()
             n_item = n_item / wolrd_size # please check the formular 
+            if global_step==1:
+                logger.info(
+                    f"rank{args.train.local_rank} End reduce all cuda first time"
+                )
             for micro_batch in micro_batches:
                 environ_meter.add(micro_batch)
+                
+                # if args.train.enable_compile:
+                    # We will pad the micro_batch to the max length of the batch.
+                    # max_length = max([(micro_batch["attention_mask"].sum(dim=-1).max()) for micro_batch in micro_batches])
+                    # max_length = args.train.token_micro_bsz
+                    # max_length_inputs = int(args.train.token_micro_bsz // args.train.ulysses_parallel_size)
+                    # if args.train.token_micro_bsz % args.train.ulysses_parallel_size != 0:
+                        # max_length_inputs += 1
+                    # if max_length_inputs > micro_batch["attention_mask"].shape[1]:
+                    #     micro_batch["attention_mask"] = torch.nn.functional.pad(micro_batch["attention_mask "], (0, max_length_inputs - micro_batch["attention_mask"].shape[1]))
+                    #     last_position_ids = micro_batch["position_ids"][:, -1]
+                    #     position_ids_pad = torch.arange(last_position_ids + 1, last_position_ids + 1 + max_length_inputs, device=micro_batch["position_ids"].device, dtype=torch.int32)
+                    #     micro_batch["position_ids"] = torch.cat([position_ids_pad, micro_batch["position_ids"]], dim=1)
+                    #     micro_batch["labels"] = torch.nn.functional.pad(micro_batch["labels"], (0, max_length_inputs - micro_batch["labels"].shape[1]), value=-100)
+                    #     micro_batch["input_ids"] = torch.nn.functional.pad(micro_batch["input_ids"], (0, max_length_inputs - micro_batch["input_ids"].shape[1]))
+                
+                # Prepare for flash attention 2
+                # cu_seq_lens = 
+                position_ids_ = micro_batch["position_ids"].flatten()
+                indices_q = torch.arange(position_ids_.size(0), device=position_ids_.device, dtype=torch.int32)
+                cu_seq_lens = torch.cat(
+                    (
+                        indices_q[position_ids_ == 0],
+                        torch.tensor(position_ids_.size(), device=position_ids_.device, dtype=torch.int32),
+                    )
+                )
+                micro_batch['cu_seq_lens'] = cu_seq_lens
+                micro_batch['max_length_q'] = position_ids_.max() + 1
+                micro_batch['max_length_k'] = position_ids_.max() + 1
+                micro_batch['cu_seq_lens_q'] = cu_seq_lens
+                micro_batch['cu_seq_lens_k'] = cu_seq_lens
+
                 micro_batch = {
                     k: v.cuda(non_blocking=True) if isinstance(v, torch.Tensor) else v for k, v in micro_batch.items()
                 }
-                
                 with model_fwd_context:
                     loss: "torch.Tensor" = model(**micro_batch, use_cache=False).loss.sum()
                     loss = loss / n_item
