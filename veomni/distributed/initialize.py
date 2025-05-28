@@ -70,7 +70,7 @@ def parallel_load_safetensors(
     shard_states = {}
     device = torch.cuda.current_device()
     for rank, files in enumerate(ckpt_chunks):
-        if rank == dist.get_rank():
+        if rank == dist.get_rank() or force_load_all:
             for file in files:
                 safetensors_file = os.path.join(filepath, file)
                 states = load_file(safetensors_file, device=device)

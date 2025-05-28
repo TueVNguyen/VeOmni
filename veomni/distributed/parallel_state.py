@@ -21,7 +21,8 @@ from functools import wraps
 from typing import TYPE_CHECKING, Callable, Literal, Optional
 
 from torch import distributed as dist
-
+from torch.distributed import get_process_group_ranks
+import torch
 from ..utils import logging
 from ..utils.import_utils import is_torch_version_greater_than
 
@@ -69,6 +70,7 @@ class ParallelState:
     pp_size: int = 1
     cp_size: int = 1
     ulysses_size: int = 1
+    hsdp_size: int = 1
     dp_mode: Literal["ddp", "fsdp1", "fsdp2"] = "fsdp1"
     device_type: str = "cuda"
     include_sp_in_fsdp: bool = True
@@ -160,6 +162,7 @@ class ParallelState:
     @property
     @requires_mesh
     def dp_mesh(self) -> "DeviceMesh":
+
         if self.sp_device_mesh is not None:
             return self.sp_device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
 
@@ -172,7 +175,10 @@ class ParallelState:
     # ----------------------------- FSDP ----------------------------- #
     @property
     def fsdp_group(self) -> Optional["ProcessGroup"]:
+        # For fsdp, we will use the device mesh from dp group and resize it to [hsdp_size, fsdp_size]
+        # To do this, efficiently,
         if self.device_mesh is not None:
+
             return self.device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["dp"])
 
     @property
@@ -185,6 +191,19 @@ class ParallelState:
     @property
     @requires_mesh
     def fsdp_mesh(self) -> "DeviceMesh":
+        if self.hsdp_size > 1:
+            
+            dp_mesh = self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
+            list_ranks_dp = get_process_group_ranks(self.fsdp_group)
+            mesh = torch.tensor(list_ranks_dp, device="cpu", dtype=torch.int)
+            device_mesh = DeviceMesh(
+                    device_type=dp_mesh.device_type,
+                    mesh=mesh,
+                    mesh_dim_names=['hsdp', 'fsdp'],
+                    _init_backend=False,
+                )
+            return device_mesh
+                
         return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
 
     @property
@@ -205,6 +224,10 @@ class ParallelState:
     @requires_mesh
     def tp_mesh(self) -> "DeviceMesh":
         return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["tp"]]
+
+    @property
+    def tp_group(self) -> Optional["ProcessGroup"]:
+        return self.device_mesh.get_group(_MESH_DIM_MAP_NAME_VESCALE["tp"])
 
     @property
     def tp_enabled(self) -> bool:
@@ -348,6 +371,7 @@ def init_parallel_state(
     cp_size: int,
     ulysses_size: int,
     dp_mode: Literal["ddp", "fsdp1", "fsdp2"],
+    hsdp_size: int=1,
     device_type: str = "cuda",
     include_sp_in_fsdp: bool = True,
 ) -> None:
@@ -363,6 +387,7 @@ def init_parallel_state(
     if is_torch_version_greater_than("2.4"):
         print("init_parallel_state here")
         fsdp_size = dist.get_world_size() // (pp_size * tp_size)
+        assert fsdp_size % hsdp_size == 0, "hsdp_size must be a factor of fsdp_size"
         device_mesh = init_device_mesh(
             device_type=device_type,
             mesh_shape=(pp_size, fsdp_size, tp_size),
@@ -397,6 +422,7 @@ def init_parallel_state(
         cp_size=cp_size,
         ulysses_size=ulysses_size,
         dp_mode=dp_mode,
+        hsdp_size=hsdp_size,
         device_type=device_type,
         include_sp_in_fsdp=include_sp_in_fsdp,
         device_mesh=device_mesh,

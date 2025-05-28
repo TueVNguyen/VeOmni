@@ -191,13 +191,14 @@ def build_parallelize_model(
                 from tqdm import tqdm
                 for param_name, full_tensor in tqdm(full_sd.items(), total=len(full_sd), desc="Loading weights from meta path"):
                     sharded_meta_param = meta_sharded_sd.get(param_name)
+                    print(param_name, full_tensor.shape)
                     sharded_tensor = distribute_tensor(
                         full_tensor,
                         sharded_meta_param.device_mesh,
                         sharded_meta_param.placements,
                     )
-                    sharded_sd[param_name] = nn.Parameter(sharded_tensor)
-                model.load_state_dict(sharded_sd, assign=True)
+                    shared_sd[param_name] = nn.Parameter(sharded_tensor)
+                model.load_state_dict(shared_sd, assign=True)
                 logger.info_rank0("Load weights from meta path successfully.")
         elif parallel_state.dp_mode == "fsdp1":
             wrap_policy = partial(

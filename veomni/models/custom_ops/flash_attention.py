@@ -284,7 +284,7 @@ def fa_peft_integration_check(
 flash_241 = is_flash_attn_greater_or_equal("2.4.1")
 deterministic_g = os.environ.get("FLASH_ATTENTION_DETERMINISTIC", "0") == "1"
 
-
+@torch.compiler.disable(recursive=True)
 def _flash_attention_forward(
     query_states: torch.Tensor,
     key_states: torch.Tensor,
@@ -437,6 +437,7 @@ class FlashAttentionKwargs(TypedDict, total=False):
 _use_top_left_mask = flash_attn_supports_top_left_mask()
 
 
+@torch.compiler.disable(recursive=True)
 def flash_attention_forward(
     module: torch.nn.Module,
     query: torch.Tensor,

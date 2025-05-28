@@ -266,7 +266,8 @@ class DistributedBatchMultiTurnSFTDatasetSampler(Sampler):
         drop_last: bool = False,
         max_length: int = 1024,
         batch_size: int = 1,
-        corss_pack: int = 100000
+        corss_pack: int = 100000,
+        use_greedy_strategy: bool = False
     ) -> None:
         self.max_length = max_length
         self.batch_size = batch_size
@@ -282,6 +283,7 @@ class DistributedBatchMultiTurnSFTDatasetSampler(Sampler):
             raise ValueError(
                 f"Invalid rank {rank}, rank should be in the interval [0, {num_replicas - 1}]"
             )
+        self.use_greedy_strategy = use_greedy_strategy
         self.dataset = dataset
         self.num_replicas = num_replicas
         self.rank = rank
@@ -395,79 +397,6 @@ class DistributedBatchMultiTurnSFTDatasetSampler(Sampler):
                     yield packs_indices
                 cnt += 1
 
-        # if cnt % self.num_replicas !=0:
-        #     yield packs_indices
-        #     cnt += 1
-        # return 
-        # batch_size = self.batch_size
-
-        # # We always append the last batch for simplicity 
-        # # Todo: support drop last
-        
-        # while (len(packs_indices)) % self.num_replicas != 0:
-        #     packs_indices.append(packs_indices[-1])
-
-        # print(f"Packs indices: {len(packs_indices)}")
-        # packs_indices_rank = []
-        # for index, pack in enumerate(packs_indices):
-        #     if index % self.num_replicas == self.rank:
-        #         packs_indices_rank.append(pack)
-
-        # assert all([isinstance(pack, list) for pack in packs_indices_rank])
-        # self.total = len(packs_indices_rank)
-        # for batch_indices in packs_indices_rank:
-        #     yield batch_indices
-
-        
-        # # Do sampling Lenghts here
-        # # First we  split the indices to 32 parts and sort the indices by the lengths and merge them
-        # import numpy as np
-        # lengths = np.array(self.dataset.lengths)
-        # length_part = self.corss_pack
-        # indices_parts = [indices[i:i+length_part] for i in range(0, len(indices), length_part)] 
-        # indices_parts = [sorted(indices_part, key=lambda x: lengths[x]) for indices_part in indices_parts]
-        # indices = []
-        # for indices_part in indices_parts:
-        #     indices.extend(indices_part)
-        # packs_indices = []
-        # packs = []
-
-        # current_pack = []
-        # current_pack_index = []
-
-        # for index in indices:
-        #     length = lengths[index]
-        #     if sum(current_pack) + length <= self.max_length:
-        #         current_pack.append(length)
-        #         current_pack_index.append(index)
-        #     else:
-        #         packs.append(current_pack[:])
-        #         packs_indices.append(current_pack_index[:])
-        #         current_pack = [length]
-        #         current_pack_index = [index]
-        # if len(current_pack) > 0:
-        #     packs.append(current_pack[:])
-        #     packs_indices.append(current_pack_index[:])
-        
-        
-        # batch_size = self.batch_size
-
-        # # We always append the last batch for simplicity 
-        # # Todo: support drop last
-        
-        # while (len(packs_indices)) % self.num_replicas != 0:
-        #     packs_indices.append(packs_indices[0])
-
-        # print(f"Packs indices: {len(packs_indices)}")
-        # packs_indices_rank = []
-        # for index, pack in enumerate(packs_indices):
-        #     if index % self.num_replicas == self.rank:
-        #         packs_indices_rank.append(pack)
-
-        # assert all([isinstance(pack, list) for pack in packs_indices_rank])
-        # self.total = len(packs_indices_rank)
-        # for batch_indices in packs_indices_rank:
-        #     yield batch_indices
     
     def get_state_dict(self):
         return {

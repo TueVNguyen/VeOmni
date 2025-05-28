@@ -88,6 +88,8 @@ class Qwen3RMSNorm(nn.Module):
         hidden_states = hidden_states.to(torch.float32)
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        # if torch.distributed.get_rank() == 0:
+            # print("hidden_states inside rms_norm: ", hidden_states._local_tensor.shape, hidden_states.placements)
         return self.weight * hidden_states.to(input_dtype)
 
     def extra_repr(self):
@@ -112,8 +114,9 @@ class Qwen3MLP(nn.Module):
 
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    # x1 = x[..., : x.shape[-1] // 2]
+    # x2 = x[..., x.shape[-1] // 2 :]
+    x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 
@@ -226,12 +229,11 @@ class Qwen3Attention(nn.Module):
         cache_position: Optional[torch.LongTensor] = None,
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[Tuple[torch.Tensor]]]:
-
+        # print("hidden_states attention: ", hidden_states.shape, hidden_states.placements, kwargs['position_ids'])
         input_shape = hidden_states.shape[:-1]
         bsz, seq_len, _ = hidden_states.size()
         hidden_shape = (*input_shape, -1, self.head_dim)
         bsz, q_len, _ = hidden_states.size()  # q_len = seq_length / sp_size
-        rank = torch.distributed.get_rank()
         hidden_states = hidden_states.view(bsz * q_len, -1)
         query_states = self.q_proj(hidden_states).view(hidden_shape)
         query_states = self.q_norm(query_states).transpose(1, 2)
@@ -245,6 +247,8 @@ class Qwen3Attention(nn.Module):
         full_q_len = query_states.size(2)  # full_q_len = seq_length
 
         cos, sin = position_embeddings
+        # print(cos.shape, sin.shape, query_states.shape, key_states.shape)
+        
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin)
 
         if past_key_value is not None:
@@ -260,21 +264,17 @@ class Qwen3Attention(nn.Module):
                     'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
                 )
             else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                # attention_interface = ALL_ATTENTION_FUNCTIONS[self.config._attn_implementation]
+                
+                from veomni.models.custom_ops.flash_attention import flash_attention_forward
+                # this make sure we didn't apply compiler to flash_attention_forward
+                attention_interface = flash_attention_forward
+        # print(query_states.shape, key_states.shape, value_states.shape)
         if get_parallel_state().tp_size > 1:
             query_states = query_states.to_local()
             key_states = key_states.to_local()
-            if "position_ids" in kwargs:
-                kwargs["position_ids"] = kwargs["position_ids"].to_local()
-            if "cu_seq_lens_q" in kwargs:
-                kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_q"].to_local()
-            if "cu_seq_lens_k" in kwargs:
-                kwargs["cu_seq_lens_k"] = kwargs["cu_seq_lens_k"].to_local()
-            if "max_length_q" in kwargs:
-                kwargs["max_length_q"] = kwargs["max_length_q"].to_local()
-            if "max_length_k" in kwargs:
-                kwargs["max_length_k"] = kwargs["max_length_k"].to_local()
-            # value_states = value_states.to_local()
+            
+     
         attn_output, attn_weights = attention_interface(
             self,
             query_states,
@@ -324,14 +324,17 @@ class Qwen3DecoderLayer(GradientCheckpointingLayer):
         **kwargs: Unpack[FlashAttentionKwargs],
     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
         residual = hidden_states
+        # hidden_states.wait()
+        # torch.distributed.barrier()
         # if torch.distributed.get_rank() == 0:
-            # print("hidden_states before input_layernorm: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
+            # print("hidden_states before input_layernorm: ", hidden_states.shape,  position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
         hidden_states = self.input_layernorm(hidden_states)
         # if torch.distributed.get_rank() == 0:
             # print("hidden_states after input_layernorm: ", hidden_states.shape, position_embeddings[0].shape, position_embeddings[1].shape, position_ids)
+        # return (hidden_states, None)
         # Self Attention
         # print(kwargs)
-        # print(position_embeddings[0].shape, position_embeddings[1].shape, attention_mask.shape, position_ids.shape, hidden_states.shape)
+        # print(position_embeddings[0].shape, position_embeddings[1].shape,  position_ids.shape, hidden_states.shape)
         hidden_states, self_attn_weights = self.self_attn(
             # hidden_states,
             # position_embeddings,
@@ -441,6 +444,8 @@ class Qwen3RotaryEmbedding(nn.Module):
             # print("position_ids: ", torch.distributed.get_rank(), position_ids)
         inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
         position_ids_expanded = position_ids[:, None, :].float()
+        # if isinstance(position_ids_expanded, torch.distributed.tensor.DTensor):
+            # inv_freq_expanded = torch.distributed.tensor.DTensor.from_local(inv_freq_expanded, device_mesh=position_ids_expanded.device_mesh, placements=position_ids_expanded.placements)
 
         device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
         with torch.autocast(device_type=device_type, enabled=False):  # Force float32
@@ -616,10 +621,13 @@ class Qwen3Model(Qwen3PreTrainedModel):
         hidden_states = inputs_embeds
 
         # create position embeddings to be shared across the decoder layers
-        position_embeddings = self.rotary_emb(hidden_states, position_ids)
+        position_embeddings = self.rotary_emb(inputs_embeds, position_ids)
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
-        
+        # if get_parallel_state().tp_size > 1:
+        #     position_ids = position_ids.to_local()
+        # print("position_embeddings: ", position_embeddings[0].shape, hidden_states.shape)
+
         for decoder_layer in self.layers[: self.config.num_hidden_layers]:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -640,6 +648,7 @@ class Qwen3Model(Qwen3PreTrainedModel):
 
             if output_attentions:
                 all_self_attns += (layer_outputs[1],)
+            # break
 
         hidden_states = self.norm(hidden_states)
 
@@ -951,9 +960,15 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
                 if not get_parallel_state().sp_enabled:
                     # Shift so that tokens < n predict n
                     hidden_states = hidden_states[..., :-1, :].contiguous()
-
+                # print(self.lm_head.weight.to_local().shape, hidden_states.to_local().shape, labels.shape)
+                if get_parallel_state().tp_size > 1:
+                    hidden_states = hidden_states.to_local()
                 hidden_states = hidden_states.view(-1, self.config.hidden_size)
-                loss = self.loss_fct(self.lm_head.weight, hidden_states, labels).sum()
+                if get_parallel_state().tp_size > 1:
+                    # we setup tensor parallel strategy for loss here 
+                    loss = self.loss_fct(self.lm_head.weight.to_local(), hidden_states, labels, vocab_size=self.lm_head.weight.shape[0], group=get_parallel_state().tp_group).sum()
+                else:
+                    loss = self.loss_fct(self.lm_head.weight, hidden_states, labels).sum()
             else:
                 loss_fct = torch.nn.CrossEntropyLoss(reduction="none")
                 logits = self.lm_head(hidden_states)
@@ -1013,9 +1028,9 @@ class Qwen3ForCausalLM(Qwen3PreTrainedModel, GenerationMixin):
     #         )
 
 if is_liger_kernel_available():
-    apply_rotary_pos_emb = liger_rotary_pos_emb
-    Qwen3RMSNorm = LigerRMSNorm
-    Qwen3MLP = LigerSwiGLUMLP
+    # apply_rotary_pos_emb = liger_rotary_pos_emb
+    # Qwen3RMSNorm = LigerRMSNorm
+    # Qwen3MLP = LigerSwiGLUMLP
     logger.info_rank0("Apply liger kernel to Qwen3.")
 
 

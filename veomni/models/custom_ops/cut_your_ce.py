@@ -1,4 +1,4 @@
-from veomni.models.custom_ops.cut_cross_entropy import linear_cross_entropy, LinearCrossEntropy
+from veomni.models.custom_ops.cut_cross_entropy import linear_cross_entropy, LinearCrossEntropy, VocabParallelOptions
 import torch
 from typing import Optional
 # embeddings = model.compute_embedding(inputs)
@@ -40,12 +40,20 @@ class CutYourCE(torch.nn.Module):
             shift=1 if not self.is_shifted else 0
         )
     
-    def forward(self, classifier_weights, hidden_states,  labels):
+    def forward(self, classifier_weights, hidden_states,  labels, vocab_size=None, group=None):
         # Modified order to match the order of the LigerFusedLinearCrossEntropyLoss
         # Note that: we didn't support bias weights here
         if len(hidden_states.shape) == 3:
             hidden_states = hidden_states.flatten(0, -2) # [batch_size, seq_len, hidden_dim] -> [batch_size * seq_len, hidden_dim]
             labels = labels.flatten()
+        if vocab_size is not None and group is not None:
+            vp_opts = VocabParallelOptions.from_vocab(vocab_size, group=group)
+            return self.ce_fn(
+                hidden_states,
+                classifier_weights,
+                labels,
+                vocab_parallel_options=vp_opts
+            )
         return self.ce_fn(
             hidden_states,
             classifier_weights,

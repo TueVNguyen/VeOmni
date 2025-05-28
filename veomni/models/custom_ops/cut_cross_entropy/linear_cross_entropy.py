@@ -161,6 +161,7 @@ class LinearCrossEntropy(nn.Module):
         c: torch.Tensor,
         targets: torch.Tensor,
         bias: torch.Tensor | None = None,
+        vocab_parallel_options: VocabParallelOptions | None = None,
     ) -> torch.Tensor:
         return linear_cross_entropy(
             e,
@@ -177,4 +178,5 @@ class LinearCrossEntropy(nn.Module):
             filter_e_grad=self.filter_e_grad,
             filter_c_grad=self.filter_c_grad,
             impl=self.impl,
+            vocab_parallel_options=vocab_parallel_options,
         )
