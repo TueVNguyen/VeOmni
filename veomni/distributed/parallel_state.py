@@ -78,6 +78,7 @@ class ParallelState:
     sp_device_mesh: Optional["DeviceMesh"] = None
     usp_device_mesh: Optional["DeviceMesh"] = None
     ep_device_mesh: Optional["DeviceMesh"] = None
+    device_mesh_fsdp: Optional["DeviceMesh"] = None
 
     def __post_init__(self):
         if not self.include_sp_in_fsdp:
@@ -192,17 +193,18 @@ class ParallelState:
     @requires_mesh
     def fsdp_mesh(self) -> "DeviceMesh":
         if self.hsdp_size > 1:
-            
-            dp_mesh = self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
-            list_ranks_dp = get_process_group_ranks(self.fsdp_group)
-            mesh = torch.tensor(list_ranks_dp, device="cpu", dtype=torch.int)
-            device_mesh = DeviceMesh(
-                    device_type=dp_mesh.device_type,
-                    mesh=mesh,
-                    mesh_dim_names=['hsdp', 'fsdp'],
-                    _init_backend=False,
-                )
-            return device_mesh
+            return self.device_mesh_fsdp['hsdp', _MESH_DIM_MAP_NAME_VESCALE["dp"]]
+            # from torch.distributed.device_mesh import DeviceMesh
+            # dp_mesh = self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
+            # list_ranks_dp = get_process_group_ranks(self.fsdp_group)
+            # mesh = torch.tensor(list_ranks_dp, device="cpu", dtype=torch.int)
+            # device_mesh = DeviceMesh(
+            #         device_type=dp_mesh.device_type,
+            #         mesh=mesh,
+            #         mesh_dim_names=['hsdp', 'fsdp'],
+            #         _init_backend=False,
+            #     )
+            # return device_mesh
                 
         return self.device_mesh[_MESH_DIM_MAP_NAME_VESCALE["dp"]]
 
@@ -393,6 +395,11 @@ def init_parallel_state(
             mesh_shape=(pp_size, fsdp_size, tp_size),
             mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["pp"], _MESH_DIM_MAP_NAME_VESCALE["dp"], _MESH_DIM_MAP_NAME_VESCALE["tp"]),
         )
+        device_mesh2 =init_device_mesh(
+            device_type=device_type,
+            mesh_shape=(pp_size, hsdp_size, fsdp_size // hsdp_size, tp_size),
+            mesh_dim_names=(_MESH_DIM_MAP_NAME_VESCALE["pp"], "hsdp" ,_MESH_DIM_MAP_NAME_VESCALE["dp"], _MESH_DIM_MAP_NAME_VESCALE["tp"]),
+        )
         if ulysses_size > 1 or cp_size > 1:
             sp_device_mesh = init_device_mesh(
                 device_type=device_type,
@@ -429,6 +436,7 @@ def init_parallel_state(
         sp_device_mesh=sp_device_mesh,
         usp_device_mesh=usp_device_mesh,
         ep_device_mesh=ep_device_mesh,
+        device_mesh_fsdp=device_mesh2,
     )
 
 

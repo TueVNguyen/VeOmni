@@ -171,7 +171,7 @@ class DataArguments:
         metadata={"help": "Number of batches loaded in advance by each worker."},
     )
     corss_pack: int = field(
-        default=50000,
+        default=100000,
         metadata={"help": "Number of tokens for training to compute training steps for dynamic batch dataloader."},
     )
     drop_last: bool = field(

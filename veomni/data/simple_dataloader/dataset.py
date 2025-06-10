@@ -42,6 +42,8 @@ def process_item_row(row, tokenizer, messages_key, is_chatml):
     input_ids = full_tokens[0]  # The output is already a tensor
     attention_mask = torch.ones_like(input_ids)
     loss_mask = torch.zeros_like(input_ids, dtype=torch.long)
+    debug = True
+    # print("here")
     # Process each message to find assistant responses
     for i, msg in enumerate(messages):
         # Get tokens for messages up to this point to find the start position
@@ -57,7 +59,16 @@ def process_item_row(row, tokenizer, messages_key, is_chatml):
         
         # If this is an assistant message, set loss mask
         if msg['role'] == 'assistant':
-            loss_mask[start_pos:end_pos] = 1
+            # value = msg['score']
+            value = 1
+            # if hasattr(msg, "score"):
+            #     value = msg['score']
+            # else:
+            #     value = 1
+            # if value==0 and debug==True:
+                # debug = False
+                # print(f"Debug: {msg['content']} has score {value}")
+            loss_mask[start_pos:end_pos] = value
     # Create position IDs
     # position_ids = torch.arange(len(input_ids), dtype=torch.long)
     position_ids = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0, max=None)
@@ -373,31 +384,76 @@ class DistributedBatchMultiTurnSFTDatasetSampler(Sampler):
         lengths = np.array(self.dataset.lengths)
         length_part = self.corss_pack
         indices_parts = [indices[i:i+length_part] for i in range(0, len(indices), length_part)] 
+        if self.use_greedy_strategy:
+            # we first sort the indices by length
+            for index in range(len(indices_parts)):
+                indices_parts[index].sort(key=lambda x: lengths[x], reverse=True)
+                new_indices =[] 
+                start = 0 
+                end = len(indices_parts[index])
+                while start < end:
+                    new_indices.append(indices_parts[index][start])
+                    new_indices.append(indices_parts[index][end])
+                    start += 1
+                    end -= 1
+                if start == end:
+                    new_indices.append(indices_parts[index][start])
+                indices_parts[index] = new_indices
+            final_parts = []
+            for index, indices_part in enumerate(indices_parts):
+                final_parts.extend(indices_part)
+            
+            cnt = 0
+            packs_indices = []
+            last_packs = []
+            current_length = 0
+            for index in final_parts:
+                current_length += lengths[index]
+                packs_indices.append(index)
+                if current_length >= self.max_length:
+                    if cnt % self.num_replicas == self.rank:
+                        yield packs_indices
+                    cnt  = (cnt + 1) % self.num_replicas
+                    current_length = 0
+                    last_packs = [k for k in packs_indices]
+                    packs_indices = []
+            
+            remain_rank = cnt % self.num_replicas # 1, 2 
+            # if len(packs_indices) == 0:
 
-        packs_indices = []
-        cnt = 0
-        for index, indices_part in enumerate(indices_parts):
-            for item in indices_part:
-                self.packing_manager.append({
-                    "index": item,
-                    "length": lengths[item]
-                })
-            while self.packing_manager.all_token_cnt >= self.max_length:
-                packs = self.packing_manager.get_samples(self.max_length, force=True)
-                # packs_indices.append([pack["index"] for pack in packs])
-                packs_indices = [pack["index"] for pack in packs]
-                if cnt % self.num_replicas == self.rank:
-                    yield packs_indices
-                cnt += 1
-        remain_rank = cnt % self.num_replicas # 1, 2 
-        if remain_rank != 0:
-            remain_rank = range(remain_rank, self.num_replicas) 
-            for i in remain_rank:
-                if cnt % self.num_replicas == self.rank:
-                    yield packs_indices
-                cnt += 1
+                # packs_indices = []
+            if remain_rank != 0:
+                remain_rank = range(remain_rank, self.num_replicas) 
+                for i in remain_rank:
+                    if cnt % self.num_replicas == self.rank:
+                        yield last_packs
+                    cnt += 1
+                
+            
+        else:
+            packs_indices = []
+            cnt = 0
+            for index, indices_part in enumerate(indices_parts):
+                for item in indices_part:
+                    self.packing_manager.append({
+                        "index": item,
+                        "length": lengths[item]
+                    })
+                while self.packing_manager.all_token_cnt >= self.max_length:
+                    packs = self.packing_manager.get_samples(self.max_length, force=True)
+                    packs_indices = [pack["index"] for pack in packs]
+                    if cnt % self.num_replicas == self.rank:
+                        yield packs_indices
+                    cnt += 1
+            remain_rank = cnt % self.num_replicas # 1, 2 
+            if remain_rank != 0:
+                remain_rank = range(remain_rank, self.num_replicas) 
+                for i in remain_rank:
+                    if cnt % self.num_replicas == self.rank:
+                        yield packs_indices
+                    cnt += 1
 
-    
+        
     def get_state_dict(self):
         return {
             "seed": self.seed,
